@@ -14,7 +14,7 @@ trademarks of Electronic Arts Inc.
 ## iPhone and iPad (this fork)
 
 This fork of [elforeign/nfs-most-wanted-mac](https://github.com/elforeign/nfs-most-wanted-mac) adds an iOS port.
-The test build (`SpeedRecomp-NGF.ipa`, from [Releases](https://github.com/EhsanWaheed/nfsmw-ios/releases)) contains
+The test build (`NFSMWIOS-NGF.ipa`, from [Releases](https://github.com/EhsanWaheed/nfsmw-ios/releases)) contains
 **no game files**. You add your own copy of the game the first time you open it.
 
 ### What you need
@@ -38,7 +38,7 @@ Documents folder (where that is: see Install, step 3). The app ignores anything 
 
 ### Install
 
-1. Install `SpeedRecomp-NGF.ipa` with [LiveContainer](https://github.com/LiveContainer/LiveContainer) or SideStore
+1. Install `NFSMWIOS-NGF.ipa` with [LiveContainer](https://github.com/LiveContainer/LiveContainer) or SideStore
    (iOS 17 or later), and open it once so its Documents folder exists.
 2. Put the files above in a folder named exactly **`game`**, so you have `game/speed.exe`, `game/CARS`,
    `game/GLOBAL` and so on.
