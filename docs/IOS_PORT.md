@@ -57,6 +57,20 @@ clone of the app (`cp -cR`, then remove `game/`, `zip -9`). On first launch the 
 own game (a folder or ZIP from the Files app, or copied in with Finder). Note that the app still contains code
 translated from `speed.exe` and effect programs generated from the owner's game; sharing it is the owner's call.
 
+### What a tester's game copy must contain
+
+The launcher checks `speed.exe` by its SHA-256 and accepts only the build this port was translated from: the
+official **v1.3** PC executable (`speed.exe`, 6,029,312 bytes, SHA-256
+`80774c2e5d619b4f120b48d4462896fd504c263399d203a238769cffde1d253c`; the Black Edition and the 1.3 patch). Any other
+version is refused at import. The folder to import (as a folder or a ZIP) is the game's install folder:
+
+- `speed.exe`
+- `CARS/`, `FRONTEND/`, `GLOBAL/`, `LANGUAGES/`, `MOVIES/`, `NIS/`, `SOUND/`, `TRACKS/` (required)
+- `CREDITS/`, `MEMCARD/`, `SUBTITLES/` and the small files beside `speed.exe` (keep them; they are tiny)
+
+Not needed (left out like the bundled copy, `game.toml` [bundle]): `*.dll`, `*_inst.exe`, `*.txt`, `server.cfg`,
+`Uninstall`, `Support`, `scripts`, `SAVE`. About 2.8 GB in all.
+
 ### Publishing (GitHub: EhsanWaheed/nfsmw-ios, public)
 
 The repository holds source only: `build/` (the translation of `speed.exe`, IPAs), `analysis/` (decompiled
