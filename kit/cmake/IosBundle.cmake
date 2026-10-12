@@ -54,8 +54,9 @@ function(pop_ios_bundle target)
       COMMAND ${Python3_EXECUTABLE} ${POP_ROOT}/tools/extract_icon.py
               --exe ${RECOMP_DEVELOPER_EXE}
               --dest $<TARGET_BUNDLE_CONTENT_DIR:${target}>
+              --image ${POP_BUILD_ROOT}/ios-icon.png
       WORKING_DIRECTORY ${POP_ROOT}
-      COMMENT "Extracting the app icon from the game executable"
+      COMMENT "Making the app icon (build/ios-icon.png when there is one, else the executable's icon)"
       VERBATIM)
   endif()
   # classic-modes.json is one resource the host reads at startup; the

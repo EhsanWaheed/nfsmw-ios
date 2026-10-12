@@ -29,6 +29,7 @@ NSString *const kStretch = @"ios.stretch";           // fill the screen whatever
 NSString *const kOutput = @"ios.outputRows";        // the game's own resolution (its height); 0 the screen's
 NSString *const kEffects = @"ios.effectsInternal";   // TEST: glow/DoF/blur before the upscale (restart)
 NSString *const kSim120 = @"ios.simulation120";      // retired: a 120 Hz simulation crashed races; forced off
+NSString *const kSeeded = @"ios.seededDetail";       // the first-run Detail level was set (once per install)
 
 // The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp), looked up by key each
 // time: the mods declare them while the game boots, after the panel exists.
@@ -228,7 +229,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         if (r && r <= _nativeRows * 0.85)
             defaultRows = r;
     [defaults() registerDefaults:@{kRows : @(defaultRows), kFps : @60, kDynamic : @YES, kStretch : @NO,
-                                   kEffects : @NO}];
+                                   kEffects : @YES}];
     _appliedRows = -2;
     _tab = TAB_HOME;
     [self buildPanel];
@@ -362,9 +363,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     s.spacing = 16;
     [left setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [left setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    // Below required: a control too wide for the row must not make UIKit break a required constraint (it may pick
+    // the panel's width and squeeze every row), it wraps the title instead.
     if (control) {
-        [control setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-        [control setContentCompressionResistancePriority:UILayoutPriorityRequired
+        [control setContentHuggingPriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisHorizontal];
+        [control setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh + 1
                                                  forAxis:UILayoutConstraintAxisHorizontal];
     }
     return s;
@@ -527,8 +530,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.outputNote = [self note:@""];
     [self updateOutputNote];
 
-    UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, or hold three fingers. The full F10 page: F10 or a "
-                               @"three-finger tap."];
+    UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, or tap or hold three fingers. The full F10 page: F10."];
     hint.textColor = UIColor.tertiaryLabelColor;
 
     NSArray *views = @[
@@ -986,6 +988,21 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         set_mod_setting("pad_kind", kind);
 }
 
+// A fresh profile has the manifest's defaults, the heaviest Detail level (Custom, every feature on): on its first
+// run on iOS the Detail level is Low instead (owner, 12 Oct: Low holds 55-70 fps on an iPhone 17 Pro Max). Once:
+// a later choice is the player's. Waits for the core mod to declare the setting.
+- (void)seedFirstRun {
+    if ([defaults() boolForKey:kSeeded])
+        return;
+    int64_t quality = -1;
+    if (!mod_setting("quality", nullptr, &quality))
+        return;
+    [defaults() setBool:YES forKey:kSeeded];
+    if (quality == 0)
+        return;
+    set_mod_setting("quality", 0);
+}
+
 // ---- actions ----------------------------------------------------------------------------------------------
 
 - (void)tabChanged:(UISegmentedControl *)c {
@@ -1057,11 +1074,21 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     hold.minimumPressDuration = 0.6;
     hold.cancelsTouchesInView = YES;
     [self.window addGestureRecognizer:hold];
+    // A three-finger tap too (on iOS the touch mapper no longer turns it into F10, input_touch.cpp).
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped3:)];
+    tap.numberOfTouchesRequired = 3;
+    tap.cancelsTouchesInView = YES;
+    [tap requireGestureRecognizerToFail:hold];
+    [self.window addGestureRecognizer:tap];
     // Controllers and the keyboard are polled, not observed: SDL owns their change handlers.
     self.poll = [NSTimer timerWithTimeInterval:1.0 / 30 target:self selector:@selector(pollInputs:) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.poll forMode:NSRunLoopCommonModes];
 }
 
+- (void)tapped3:(UITapGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateRecognized)
+        [self toggle];
+}
 - (void)held:(UILongPressGestureRecognizer *)g {
     if (g.state == UIGestureRecognizerStateBegan)
         [self toggle];
@@ -1094,9 +1121,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     // line, and an F10 page's content changed from elsewhere.
     if (n % 15 == 0) {
         [self publishKind];
+        [self seedFirstRun];
         if (self.root.hidden)
             return;
-        if (mods_page_visible()) { // the F10 page opened (Edit controls, a three-finger tap): it takes over
+        if (mods_page_visible()) { // the F10 page opened (Edit controls, F10): it takes over
             [self close];
             return;
         }
@@ -1123,12 +1151,15 @@ void ios_overlay_apply_launch_settings() {
     // The scene markers: the core mod sends them when this is set, and the renderer's scene height then comes
     // from host_upscale_set_rows (the panel). Native until the panel applies the saved choice.
     setenv("RECOMP_REMASTER_UPSCALE", "2", 0);
+    setenv("RECOMP_UPSCALE_FRONTEND", "1", 0); // the menus' garage scene too, not only races
     host_upscale_set_rows(0);
+    // The game's resolution (main.cpp note_screen_size reads it before the game boots).
+    // Effects (glow, depth of field, motion blur) at the 3D resolution is the default: on an iPhone it saves GPU
+    // time at no visible cost (owner, 12 Oct).
+    [d registerDefaults:@{kOutput : @(kDefaultOutput), kEffects : @YES}];
+    g_launch_output = (int)[d integerForKey:kOutput];
     if ([d boolForKey:kEffects])
         setenv("RECOMP_UPSCALE_EFFECTS_INTERNAL", "1", 0);
-    // The game's resolution (main.cpp note_screen_size reads it before the game boots).
-    [d registerDefaults:@{kOutput : @(kDefaultOutput)}];
-    g_launch_output = (int)[d integerForKey:kOutput];
     setenv("RECOMP_IOS_OUTPUT_ROWS", std::to_string(g_launch_output).c_str(), 1);
     // The 120 Hz simulation test crashed races (SIGSEGV at the start, 12 Oct): off, whatever was saved.
     [d removeObjectForKey:kSim120];

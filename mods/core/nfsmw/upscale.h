@@ -30,6 +30,7 @@ static uint32_t g_up_cam_mem;    /* guest memory for the two SetTransform matric
 static uint64_t g_up_cams;
 static int g_up_open;            /* a begin went out this frame */
 static int g_up_late_end;        /* RECOMP_UPSCALE_EFFECTS_INTERNAL=1: the end marker goes after the post chain */
+static int g_up_frontend;        /* RECOMP_UPSCALE_FRONTEND=1 (iOS): the front end's 3D scene is upscaled too */
 static int g_up_logged = -1;     /* the last state logged: 1 the world is upscaled, 2 the PC look stands aside */
 static uint64_t g_up_begins, g_up_ends, g_up_aside;
 
@@ -82,7 +83,9 @@ static void up_send_camera(uint32_t dev) {
 
 static void up_scene_begin(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv, void *user) {
     (void)cpu; (void)inv; (void)user;
-    if (get_u32(0x00925e90u) != 6) return;                                        /* the world only */
+    /* The world only, unless the host asks for the front end too (iOS: its garage scene at the screen's size cost
+     * an iPhone more than a race did, owner 12 Oct); a screen without a main view sends no begin either way. */
+    if (get_u32(0x00925e90u) != 6 && !g_up_frontend) return;
     if (g_look == LOOK_PC || get_u32(0x009017fcu) || get_u32(0x00901828u)) {      /* the PC look: native */
         ++g_up_aside;
         up_log_state(api, 2);
@@ -123,6 +126,7 @@ static void upscale_init(const PopModApi *api) {
      * depth of field and motion blur draw into the smaller scene backing before the upscale. The end marker is then
      * installed by upscale_install_end_late, after pfx_frame on the same call (same-address hooks run in install order). */
     g_up_late_end = getenv("RECOMP_UPSCALE_EFFECTS_INTERNAL") && *getenv("RECOMP_UPSCALE_EFFECTS_INTERNAL") == '1';
+    g_up_frontend = getenv("RECOMP_UPSCALE_FRONTEND") && *getenv("RECOMP_UPSCALE_FRONTEND") == '1';
     const int ok = install_at(0x006de210u, 0x006ded21u, up_scene_begin, POP_HOOK_BEFORE, UPSCALE_SLOT_BEGIN) == POP_OK &&
                    (g_up_late_end ||
                     install_at(0x006c3870u, 0x006e75a6u, up_scene_end, POP_HOOK_BEFORE, UPSCALE_SLOT_END) == POP_OK);

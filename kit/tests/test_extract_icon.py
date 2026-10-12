@@ -46,7 +46,8 @@ class IconTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = extract_icon.write_icons(EXE, tmp)
             self.assertEqual([p.name for p in paths],
-                             ["Icon-29@2x.png", "Icon-40@2x.png", "Icon-60@2x.png", "Icon-76@2x.png", "Icon-83.5@2x.png"])
+                             ["Icon-29@2x.png", "Icon-40@2x.png", "Icon-60@2x.png", "Icon-76@2x.png", "Icon-83.5@2x.png",
+                              "Icon-29@3x.png", "Icon-40@3x.png", "Icon-60@3x.png"])
             for path, (_, px) in zip(paths, extract_icon.IOS_ICONS):
                 with Image.open(path) as image:
                     self.assertEqual(image.size, (px, px))

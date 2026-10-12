@@ -3,6 +3,9 @@
 
 #include <SDL3/SDL_scancode.h>
 #include <math.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 namespace {
 void motion(std::vector<TouchAction> *out, double x, double y, bool place = true) {
@@ -298,7 +301,11 @@ void TouchMapper::finger_up(TouchPoint p, uint64_t now, std::vector<TouchAction>
         // Right click between the two fingers, where the second one landed.
         click(out, 1, tap2_x_, tap2_y_, now);
     } else if (max_fingers_ == 3 && !moved) {
+#if !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+        // On iOS three fingers open the iOS settings panel instead (host/sdl/ios_overlay.mm), which holds the F10
+        // page's tabs; the page itself stays on F10 and its on-screen button.
         key_tap(out, SDL_SCANCODE_F10);
+#endif
     } else if (max_fingers_ == 4 && !moved) {
         text_input_ = !text_input_;
     }

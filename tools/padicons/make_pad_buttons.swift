@@ -225,7 +225,11 @@ func render(_ draw: (CGContext) -> Void) -> [UInt8] {
     // A bitmap context's first row in memory is the picture's top (the texture's first row), with y up in
     // the drawing, so the art above draws as it reads.
     ctx.setShouldAntialias(true)
-    ctx.scaleBy(x: CGFloat(size) / CGFloat(art), y: CGFloat(size) / CGFloat(art))
+    // The glyph fills 80% of the texture: the menus draw the console prompt icons a little larger than the
+    // button art they were made for, so the transparent margin brings them back to the text's size.
+    let k = CGFloat(size) / CGFloat(art), fill: CGFloat = 0.8
+    ctx.translateBy(x: CGFloat(size) * (1 - fill) / 2, y: CGFloat(size) * (1 - fill) / 2)
+    ctx.scaleBy(x: k * fill, y: k * fill)
     draw(ctx)
     let bleed = [UInt8(discFill.r * 255), UInt8(discFill.g * 255), UInt8(discFill.b * 255)]
     for i in stride(from: 0, to: px.count, by: 4) {

@@ -10,7 +10,7 @@
 id = "nfsmw"
 name = "Need for Speed: Most Wanted"
 app_name = "SpeedRecomp"
-bundle_id = "dev.recompkit.nfsmw"
+bundle_id = "com.E5N97.nfsmw"
 executable = "speed.exe"
 sha256 = "80774c2e5d619b4f120b48d4462896fd504c263399d203a238769cffde1d253c"
 image_base = 0x00400000
