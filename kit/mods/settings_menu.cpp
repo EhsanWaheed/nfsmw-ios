@@ -39,6 +39,9 @@ struct Item {
 };
 
 bool g_open = false;
+// Open as a model only (mods_menu_open_headless): a host's own UI reads the snapshot and acts on lines, while the
+// page is not drawn and does not take the keyboard (mods_menu_is_open stays false). F10 opening it takes over.
+bool g_headless = false;
 bool g_advanced = false; // Remaster run 13: the Advanced section is closed each time the menu opens
 int g_tab = 0;
 size_t g_cursor = 0; // index into the current tab's items
@@ -709,6 +712,7 @@ bool mods_menu_enabled() {
 void mods_menu_open(int tab) {
     std::lock_guard lock(g_mu);
     g_open = true;
+    g_headless = false;
     g_advanced = false;
     g_tab = std::clamp(tab, 0, kTabCount - 1);
     g_cursor = 0;
@@ -732,11 +736,36 @@ void mods_menu_close() {
     }
     clear_draft();
     g_open = false;
+    g_headless = false;
 }
 
 bool mods_menu_is_open() {
     std::lock_guard lock(g_mu);
-    return g_open;
+    return g_open && !g_headless;
+}
+
+bool mods_menu_open_headless(int tab) {
+    std::lock_guard lock(g_mu);
+    if (g_open && !g_headless)
+        return false; // the page is showing (F10); the host's UI waits for it to close
+    if (!g_open) {
+        g_open = true;
+        g_headless = true;
+        g_advanced = false;
+        g_cursor = 0;
+        g_status.clear();
+        g_tab = std::clamp(tab, 0, kTabCount - 1);
+        fix_cursor(build(g_tab), +1);
+    } else if (tab != g_tab) {
+        show_tab(tab);
+    }
+    return true;
+}
+
+void mods_menu_close_headless() {
+    std::lock_guard lock(g_mu);
+    if (g_open && g_headless)
+        mods_menu_close();
 }
 
 int mods_menu_pending_count() {

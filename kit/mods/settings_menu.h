@@ -44,6 +44,11 @@ void mods_menu_open(int tab);
 // Closing discards an unapplied Graphics draft (the status said so while it was pending).
 void mods_menu_close(void);
 bool mods_menu_is_open(void);
+// The menu as a model for a host's own UI (the iOS overlay's tabs): open on `tab` (or switch to it) without
+// drawing the page or taking the keyboard; snapshot, pointer_line and set_tab work as when it shows. False
+// while the page itself is showing (F10). Closing it discards an unapplied draft, as closing the page does.
+bool mods_menu_open_headless(int tab);
+void mods_menu_close_headless(void);
 // A DirectInput key code, or the menu's own codes below. True when consumed.
 bool mods_menu_key(int dik);
 constexpr int MENU_KEY_TAB_PREV = 0xc9; // Page Up / left shoulder
