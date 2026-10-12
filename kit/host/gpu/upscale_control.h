@@ -24,6 +24,10 @@ void host_upscale_set_rows(int rows);
 // physical pixels; 0 before one has (or while the scene draws native).
 void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h);
 
+// The presenter's picture placement (host/compositor.cpp): 0 keeps the game's
+// aspect (bars where it differs from the screen's), 1 stretches it to fill.
+void host_compositor_set_stretch(int stretch);
+
 #ifdef __cplusplus
 }
 #endif

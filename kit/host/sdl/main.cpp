@@ -210,6 +210,13 @@ void note_screen_size() {
         fprintf(stderr, "[host] display pixel size: %dx%d\n", w, h);
     g_screen_w.store(w);
     g_screen_h.store(h);
+#if TARGET_OS_IPHONE
+    // The mods' screen_size (the core mod's Auto resolution) reads this record; without it Auto falls back
+    // to 1280x720, which boxes a 16:9 picture on a 4:3 iPad and leaves MetalFX nothing to scale up.
+    int lw = 0, lh = 0;
+    host_landscape_screen_size(w, h, &lw, &lh);
+    host_display_set_screen(lw, lh);
+#endif
 }
 
 // The window's size in points and in drawable pixels.

@@ -2,7 +2,10 @@
 #include "ios_overlay.h"
 
 #include "../gpu/upscale_control.h"
+#include "../../mods/mods_internal.h"
+#include "../../mods/settings_menu.h"
 #include "../../runtime/display_seam.h"
+#include "game_config.h"
 
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
@@ -12,6 +15,8 @@
 #include <atomic>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <string>
 #include <vector>
 
 namespace {
@@ -20,8 +25,44 @@ namespace {
 NSString *const kRows = @"ios.internalRows";         // scene height in pixels; 0 native
 NSString *const kFps = @"ios.frameCap";              // 30, 60, 90 or 120
 NSString *const kDynamic = @"ios.dynamicResolution"; // step down while the device is hot
+NSString *const kStretch = @"ios.stretch";           // fill the screen whatever the game's aspect
 NSString *const kEffects = @"ios.effectsInternal";   // TEST: glow/DoF/blur before the upscale (restart)
 NSString *const kSim120 = @"ios.simulation120";      // TEST: 120 Hz simulation (restart)
+
+// The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp). The few the panel
+// shows are looked up by key each time it opens: the mods declare them while the game boots, after the
+// panel exists, and a game without one of them simply has that row disabled.
+const char *const kCoreMod = "core." RECOMP_GAME_ID;
+bool mod_setting(const char *key, uint32_t *owner, int64_t *value, int64_t *min, int64_t *max) {
+    const uint32_t n = mods_settings_entry_count();
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t o = 0;
+        const char *mod_id = nullptr, *k = nullptr, *label = nullptr;
+        int32_t kind = 0;
+        int64_t v = 0, lo = 0, hi = 0;
+        if (mods_settings_entry(i, &o, &mod_id, &k, &label, &kind, &v, &lo, &hi) && mod_id && k &&
+            !strcmp(mod_id, kCoreMod) && !strcmp(k, key)) {
+            if (owner) *owner = o;
+            if (value) *value = v;
+            if (min) *min = lo;
+            if (max) *max = hi;
+            return true;
+        }
+    }
+    return false;
+}
+// Written the way the F10 page applies a change: on the host's main thread, as the player's choice (saved).
+void set_mod_setting(const char *key, int64_t value) {
+    std::string k = key;
+    mods_menu_main_thread_call([k, value] {
+        uint32_t owner = 0;
+        if (!mod_setting(k.c_str(), &owner, nullptr, nullptr, nullptr))
+            return;
+        const PopModStatus st = mods_settings_set(owner, k.c_str(), value);
+        fprintf(stderr, "[ios] overlay: %s/%s = %lld%s\n", kCoreMod, k.c_str(), (long long)value,
+                st == POP_OK ? "" : " (refused)");
+    });
+}
 
 constexpr int kDefaultRows = 1080;
 constexpr int kMinRows = 600; // dynamic resolution never goes below this
@@ -33,7 +74,8 @@ std::atomic<bool> g_visible{false};
 NSUserDefaults *defaults() {
     static NSUserDefaults *d = [] {
         NSUserDefaults *u = NSUserDefaults.standardUserDefaults;
-        [u registerDefaults:@{kRows : @(kDefaultRows), kFps : @60, kDynamic : @YES, kEffects : @NO, kSim120 : @NO}];
+        [u registerDefaults:@{kRows : @(kDefaultRows), kFps : @60, kDynamic : @YES, kStretch : @NO, kEffects : @NO,
+                              kSim120 : @NO}];
         return u;
     }();
     return d;
@@ -48,8 +90,10 @@ NSUserDefaults *defaults() {
 @property(nonatomic, weak) UIWindow *window;
 @property(nonatomic) UIView *root;  // full-screen dim layer; hidden when closed
 @property(nonatomic) UISegmentedControl *resolution, *frameCap;
-@property(nonatomic) UISwitch *dynamic, *effects, *sim120;
+@property(nonatomic) UISwitch *dynamic, *stretch, *effects, *sim120;
 @property(nonatomic) UILabel *status;
+// Controls bound to core-mod settings: the control's tag indexes _modKeys.
+@property(nonatomic) NSMutableArray<UIControl *> *modControls;
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
 @property(nonatomic) BOOL comboHeld, shortcutHeld;
@@ -60,6 +104,7 @@ NSUserDefaults *defaults() {
     std::vector<int> _fps;  // the frame caps this display can show
     int _nativeRows;
     int _appliedRows;
+    std::vector<std::string> _modKeys; // the core-mod key of each bound control (by its tag)
 }
 
 - (instancetype)initWithWindow:(UIWindow *)window {
@@ -88,6 +133,7 @@ NSUserDefaults *defaults() {
                                              object:nil];
     [self applyResolution];
     [self applyFrameCap];
+    host_compositor_set_stretch([defaults() boolForKey:kStretch]);
     fprintf(stderr, "[ios] overlay: native %d rows, display up to %ld Hz, thermal %ld\n", _nativeRows, (long)maxFps,
             (long)NSProcessInfo.processInfo.thermalState);
     return self;
@@ -198,6 +244,47 @@ NSUserDefaults *defaults() {
     return s;
 }
 
+- (UILabel *)section:(NSString *)title {
+    UILabel *l = [self label:title.uppercaseString style:UIFontTextStyleFootnote];
+    l.textColor = UIColor.systemOrangeColor;
+    return l;
+}
+
+// A control bound to a core-mod setting; its value is read when the panel opens (refreshModControls).
+- (UIControl *)bind:(UIControl *)c key:(const char *)key {
+    c.tag = (NSInteger)_modKeys.size();
+    _modKeys.emplace_back(key);
+    [c addTarget:self action:@selector(modChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.modControls addObject:c];
+    return c;
+}
+- (UISegmentedControl *)modSegment:(const char *)key titles:(NSArray<NSString *> *)titles {
+    return (UISegmentedControl *)[self bind:[[UISegmentedControl alloc] initWithItems:titles] key:key];
+}
+- (UISwitch *)modSwitch:(const char *)key {
+    return (UISwitch *)[self bind:[UISwitch new] key:key];
+}
+- (void)refreshModControls {
+    for (UIControl *c in self.modControls) {
+        int64_t v = 0, lo = 0, hi = 0;
+        const bool known = mod_setting(_modKeys[(size_t)c.tag].c_str(), nullptr, &v, &lo, &hi);
+        c.enabled = known;
+        if ([c isKindOfClass:UISwitch.class])
+            ((UISwitch *)c).on = known && v != 0;
+        else if ([c isKindOfClass:UISegmentedControl.class]) {
+            UISegmentedControl *s = (UISegmentedControl *)c;
+            s.selectedSegmentIndex = known && v >= 0 && v < s.numberOfSegments ? (NSInteger)v : UISegmentedControlNoSegment;
+        }
+    }
+}
+- (void)modChanged:(UIControl *)c {
+    const char *key = _modKeys[(size_t)c.tag].c_str();
+    if ([c isKindOfClass:UISwitch.class])
+        set_mod_setting(key, ((UISwitch *)c).on ? 1 : 0);
+    else if ([c isKindOfClass:UISegmentedControl.class])
+        set_mod_setting(key, ((UISegmentedControl *)c).selectedSegmentIndex);
+}
+
 - (void)buildPanel {
     UIView *root = [[UIView alloc] initWithFrame:self.window.bounds];
     root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -233,41 +320,65 @@ NSUserDefaults *defaults() {
     [self.frameCap addTarget:self action:@selector(frameCapChanged:) forControlEvents:UIControlEventValueChanged];
 
     self.dynamic = [self switchFor:kDynamic action:@selector(dynamicChanged:)];
+    self.stretch = [self switchFor:kStretch action:@selector(stretchChanged:)];
     self.effects = [self switchFor:kEffects action:@selector(effectsChanged:)];
     self.sim120 = [self switchFor:kSim120 action:@selector(sim120Changed:)];
     self.status = [self label:@"" style:UIFontTextStyleFootnote];
     self.status.textColor = UIColor.secondaryLabelColor;
+    self.modControls = [NSMutableArray array];
 
     UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
     [done setTitle:@"Done" forState:UIControlStateNormal];
     done.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
     [done addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
     UIStackView *header = [[UIStackView alloc]
-        initWithArrangedSubviews:@[ [self label:@"Display (iOS)" style:UIFontTextStyleTitle3], done ]];
+        initWithArrangedSubviews:@[ [self label:@"Settings (iOS)" style:UIFontTextStyleTitle3], done ]];
     header.alignment = UIStackViewAlignmentCenter;
 
-    UILabel *experimental = [self label:@"Experimental - applies at the next launch" style:UIFontTextStyleFootnote];
-    experimental.textColor = UIColor.systemOrangeColor;
     UILabel *hint = [self label:@"Open or close: L3+R3, ⌘S, or hold three fingers. "
-                                @"Game and kit settings: F10 or a three-finger tap."
+                                @"Every other setting: F10 or a three-finger tap."
                           style:UIFontTextStyleCaption1];
     hint.textColor = UIColor.tertiaryLabelColor;
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
+    NSArray *views = @[
         header,
-        [self label:@"Internal resolution (MetalFX upscales the 3D scene; HUD stays native)" style:UIFontTextStyleSubheadline],
+        [self section:@"Display"],
+        [self label:@"Internal resolution (MetalFX upscales the 3D scene; the HUD stays native)"
+              style:UIFontTextStyleSubheadline],
         self.resolution,
         [self row:@"Frame cap (fps)" control:self.frameCap],
         [self row:@"Dynamic resolution (steps down when hot, never below 600p)" control:self.dynamic],
+        [self row:@"Stretch to fill the screen" control:self.stretch],
         self.status,
-        experimental,
+
+        [self section:@"Graphics"],
+        [self row:@"Look" control:[self modSegment:"look" titles:@[ @"Definitive", @"Xbox 360", @"PC" ]]],
+        [self row:@"Detail" control:[self modSegment:"quality"
+                                              titles:@[ @"Low", @"Medium", @"High", @"Ultra", @"Custom" ]]],
+        [self row:@"Smooth edges (MSAA; costs GPU time and memory)"
+          control:[self modSegment:"antialiasing" titles:@[ @"Off", @"2x", @"4x" ]]],
+        [self row:@"Motion blur" control:[self modSwitch:"motion_blur"]],
+        [self row:@"Movie-style background blur (cut-scenes)" control:[self modSwitch:"cinematic_dof"]],
+
+        [self section:@"Controller"],
+        [self row:@"PlayStation-style button layout" control:[self modSwitch:"ps2_controls"]],
+        [self row:@"PlayStation button icons when a controller is used (next launch; needs "
+                  @"GLOBAL/XtendedInputButtons.tpk in the game)"
+          control:[self modSwitch:"ps_icons"]],
+
+        [self section:@"World (next launch)"],
+        [self row:@"Day cycle (the light moves through the day)" control:[self modSwitch:"time_of_day"]],
+        [self row:@"Weather cycle" control:[self modSwitch:"weather"]],
+
+        [self section:@"Experimental (next launch)"],
         [self row:@"Effects (glow, depth of field, motion blur) at internal resolution" control:self.effects],
         [self row:@"Simulation at 120 Hz (for the 120 cap; off = 60 Hz)" control:self.sim120],
         hint,
-    ]];
+    ];
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:views];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 12;
-    [stack setCustomSpacing:4 afterView:stack.arrangedSubviews[1]];
+    [stack setCustomSpacing:4 afterView:views[2]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIScrollView *scroll = [UIScrollView new];
@@ -324,6 +435,10 @@ NSUserDefaults *defaults() {
 - (void)frameCapChanged:(UISegmentedControl *)c {
     [defaults() setInteger:_fps[(size_t)c.selectedSegmentIndex] forKey:kFps];
     [self applyFrameCap];
+}
+- (void)stretchChanged:(UISwitch *)s {
+    [defaults() setBool:s.on forKey:kStretch];
+    host_compositor_set_stretch(s.on);
 }
 - (void)dynamicChanged:(UISwitch *)s {
     [defaults() setBool:s.on forKey:kDynamic];

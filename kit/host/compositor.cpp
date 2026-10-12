@@ -5,6 +5,7 @@
 #include "ui_layer.h"
 #else
 #include "ui_frame_contract.h"
+#include "gpu/upscale_control.h"
 #endif
 
 #include <algorithm>
@@ -48,12 +49,20 @@ double anchored_axis(int p, int domain, int drawable, int scale, int8_t a) {
         return drawable - (double(domain) - p) * scale;
     return (drawable - double(domain) * scale) / 2 + double(p) * scale;
 }
-CompositeRect whole_rect(const CompositorInput &in, bool integer) {
+CompositeRect fit_rect(const CompositorInput &in, bool integer) {
     const double scale =
         integer ? compositor_ui_scale(in.drawable_h, in.guest_h, in.scale_override)
                 : std::min(double(in.drawable_w) / in.guest_w, double(in.drawable_h) / in.guest_h);
     const double w = in.guest_w * scale, h = in.guest_h * scale;
     return {(in.drawable_w - w) / 2, (in.drawable_h - h) / 2, w, h};
+}
+// host_compositor_set_stretch: the game's picture fills the drawable instead of keeping its aspect (the iOS
+// display menu's Stretch). Only the aspect fit stretches; integer-scaled menus and the settings page do not.
+std::atomic<bool> g_stretch{false};
+CompositeRect whole_rect(const CompositorInput &in, bool integer) {
+    if (!integer && g_stretch.load(std::memory_order_relaxed))
+        return {0, 0, double(in.drawable_w), double(in.drawable_h)};
+    return fit_rect(in, integer);
 }
 // Enhanced gameplay with Wide view off on a drawable wider than the guest's
 // aspect. Its world was projected for the guest's width, so it is shown boxed
@@ -76,13 +85,13 @@ CompositeRect settings_page_rect(const CompositorInput &in) {
         in.settings_page_h > 0) {
         page.guest_w = in.settings_page_w;
         page.guest_h = in.settings_page_h;
-        return pixel_rect(whole_rect(page, false));
+        return pixel_rect(fit_rect(page, false));
     }
     page.guest_w = 640;
     page.guest_h = 480;
     const int fits = std::min(in.drawable_w / 640, in.drawable_h / 480);
     if (fits < 1)
-        return pixel_rect(whole_rect(page, false));
+        return pixel_rect(fit_rect(page, false));
     page.scale_override =
         std::min(compositor_ui_scale(in.drawable_h, 480, in.scale_override), fits);
     return pixel_rect(whole_rect(page, true));
@@ -250,6 +259,10 @@ void subtract(std::vector<CompositeRect> &pieces, CompositeRect b) {
     pieces.swap(next);
 }
 } // namespace
+
+extern "C" void host_compositor_set_stretch(int stretch) {
+    g_stretch.store(stretch != 0);
+}
 
 bool compositor_settings_page_drawn(int *x, int *y, int *w, int *h) {
     const uint64_t v = g_settings_page_drawn.load(std::memory_order_relaxed);

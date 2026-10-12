@@ -9,6 +9,18 @@
 static atomic_int g_pad_prompts;
 static uint32_t g_pad_key_hook, g_pad_pack_path;
 static int g_pad_icons_enabled, g_pad_pack_requested;
+/* Which glyphs the console prompts show: 1 PlayStation, 2 Xbox. From `pad_glyphs` (0 follows the
+ * controller), the controller's kind from `pad_kind` (the host sets it: 1 PlayStation, 2 Xbox and others;
+ * 0 unknown shows PlayStation, as before). Re-read with each pad poll, so a different controller swaps
+ * the glyphs on screen. */
+static atomic_int g_pad_style = 1;
+static int frontend_style_read(void) {
+    int64_t choice = 0, kind = 0;
+    g_api->settings_get(g_api, "pad_glyphs", &choice);
+    g_api->settings_get(g_api, "pad_kind", &kind);
+    if (choice == 1 || choice == 2) return (int)choice;
+    return kind == 2 ? 2 : 1;
+}
 
 static uint32_t frontend_hash(const char *s) {
     uint32_t h = 0xffffffffu;
@@ -31,6 +43,7 @@ static void frontend_pad_activity(const PopModApi *api) {
     static uint32_t previous_buttons, previous_pov = 0xffffffffu;
     static int32_t previous_x = 32768, previous_y = 32768;
     if (!g_pad_icons_enabled) return;
+    atomic_store(&g_pad_style, frontend_style_read());
     uint32_t pad = get_u32(0x0091f150u), state = 0;
     if (!pad) { atomic_store(&g_pad_prompts, 0); return; }
     uint32_t getter = get_u32(get_u32(pad) + 4);
@@ -112,22 +125,32 @@ static void frontend_object(uint32_t object) {
         frontend_mode_tree(object, 0, 0, 0);
     }
     if (get_u32(object + 0x18) == 1) {
-        static const char *const names[][2] = {
-            {"CROSS","PS3_CROSS"}, {"TRIANGLE","PS3_TRIANGLE"},
-            {"SQUARE","PS3_SQUARE"}, {"CIRCLE","PS3_CIRCLE"},
-            {"SELECT","PS3_R1"}, {"L2","PS3_L1"},
-            {"L3","PS3_R3"}, {"R3","PS3_L3"},
-            {"START","PS3_START"}, {"L1","PS3_L2"}, {"R1","PS3_R2"},
-            {"LEFT_ANALOG","PS3_LANALOG"}, {"RIGHT_ANALOG","PS3_RANALOG"},
-            {"DPAD","PS3_DPAD"}, {"DPAD_UPDOWN","PS3_DPAD_Y"},
-            {"DPAD_LEFTRIGHT","PS3_DPAD_X"}, {"DPAD_UP","PS3_DPAD_UP"},
-            {"DPAD_DOWN","PS3_DPAD_DOWN"}, {"DPAD_LEFT","PS3_DPAD_LEFT"},
-            {"DPAD_RIGHT","PS3_DPAD_RIGHT"}
+        /* The console object's texture, then the PlayStation and Xbox glyphs for the same button
+         * (padicons/GLOBAL/RecompPadButtons.tpk). An object already swapped is matched by either glyph
+         * name too, so a change of controller swaps it again. The d-pad is the same on both. */
+        static const char *const names[][3] = {
+            {"CROSS","PS3_CROSS","XBX_A"}, {"TRIANGLE","PS3_TRIANGLE","XBX_Y"},
+            {"SQUARE","PS3_SQUARE","XBX_X"}, {"CIRCLE","PS3_CIRCLE","XBX_B"},
+            {"SELECT","PS3_R1","XBX_RB"}, {"L2","PS3_L1","XBX_LB"},
+            {"L3","PS3_R3","XBX_RS"}, {"R3","PS3_L3","XBX_LS"},
+            {"START","PS3_START","XBX_MENU"}, {"L1","PS3_L2","XBX_LT"}, {"R1","PS3_R2","XBX_RT"},
+            {"LEFT_ANALOG","PS3_LANALOG","XBX_LSTICK"}, {"RIGHT_ANALOG","PS3_RANALOG","XBX_RSTICK"},
+            {"DPAD","PS3_DPAD","PS3_DPAD"}, {"DPAD_UPDOWN","PS3_DPAD_Y","PS3_DPAD_Y"},
+            {"DPAD_LEFTRIGHT","PS3_DPAD_X","PS3_DPAD_X"}, {"DPAD_UP","PS3_DPAD_UP","PS3_DPAD_UP"},
+            {"DPAD_DOWN","PS3_DPAD_DOWN","PS3_DPAD_DOWN"}, {"DPAD_LEFT","PS3_DPAD_LEFT","PS3_DPAD_LEFT"},
+            {"DPAD_RIGHT","PS3_DPAD_RIGHT","PS3_DPAD_RIGHT"}
         };
+        enum { NAME_COUNT = sizeof names / sizeof names[0] };
+        static uint32_t hashes[NAME_COUNT][3];
+        if (!hashes[0][0])
+            for (unsigned i = 0; i < NAME_COUNT; ++i)
+                for (unsigned k = 0; k < 3; ++k) hashes[i][k] = frontend_hash(names[i][k]);
+        const unsigned want = atomic_load(&g_pad_style) == 2 ? 2 : 1;
         uint32_t hash = get_u32(object + 0x24);
-        for (unsigned i = 0; i < sizeof names / sizeof names[0]; ++i) {
-            if (hash == frontend_hash(names[i][0])) {
-                g_api->guest_write_u32(g_api, object + 0x24, frontend_hash(names[i][1]));
+        for (unsigned i = 0; i < NAME_COUNT; ++i) {
+            if (hash == hashes[i][0] || hash == hashes[i][1] || hash == hashes[i][2]) {
+                if (hash != hashes[i][want])
+                    g_api->guest_write_u32(g_api, object + 0x24, hashes[i][want]);
                 g_api->guest_write_u32(g_api, object + 0x1c, get_u32(object + 0x1c) | 0x400000u);
                 break;
             }
@@ -184,14 +207,31 @@ static void frontend_pad_load(const PopModApi *api) {
     if (api->guest_call(api, 0x0065fd30u, 0, args, 5, &resource) == POP_OK && resource &&
         api->guest_call(api, 0x006616f0u, resource, begin, 2, NULL) == POP_OK) {
         g_pad_pack_requested = 1;
-        api->log(api, "core.nfsmw: PlayStation button texture resource requested");
+        api->log(api, "core.nfsmw: controller button textures requested");
     }
 }
+/* The glyphs come from the mod's own pack (tools/padicons/make_pad_buttons.swift), found through an
+ * overlay as the Xbox particles' pack is. Without it the console prompts would point at textures that do
+ * not exist and draw blank, so the menus keep the keyboard prompts instead. */
 static void frontend_pad_init(const PopModApi *api) {
-    static const char path[] = "GLOBAL\\XtendedInputButtons.tpk";
+    static const char path[] = "GLOBAL\\RecompPadButtons.tpk";
     void *data = NULL;
     g_pad_icons_enabled = (int)setting("ps_icons", 1);
     if (!g_pad_icons_enabled) return;
+    char file[2048];
+    snprintf(file, sizeof file, "%s/padicons/GLOBAL/RecompPadButtons.tpk", api->mod_dir(api));
+    FILE *f = fopen(file, "rb");
+    uint32_t layer = 0;
+    if (f) fclose(f);
+    snprintf(file, sizeof file, "%s/padicons", api->mod_dir(api));
+    if (!f || api->overlay_push(api, file, &layer) != POP_OK) {
+        api->log(api, f ? "core.nfsmw: controller button icons: overlay refused; keyboard prompts kept"
+                        : "core.nfsmw: controller button icons: no padicons/GLOBAL/RecompPadButtons.tpk "
+                          "beside the mod; keyboard prompts kept");
+        g_pad_icons_enabled = 0;
+        return;
+    }
+    atomic_store(&g_pad_style, frontend_style_read());
     api->on_key(api, frontend_key, NULL, &g_pad_key_hook);
     if (api->guest_alloc(api, sizeof path, &g_pad_pack_path) == POP_OK &&
         api->guest_ptr(api, g_pad_pack_path, sizeof path, &data) == POP_OK)
