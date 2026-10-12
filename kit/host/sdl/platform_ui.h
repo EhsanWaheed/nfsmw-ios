@@ -6,6 +6,9 @@
 #include "../game_path.h"
 
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 #include <cstdint>
 #include <string>
@@ -13,6 +16,14 @@
 // Hints that must be set before SDL_Init. Desktop: click-through focus, no
 // screensaver. iOS/Android: landscape, no synthesized touch->mouse events.
 void platform_ui_init_hints();
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+// iOS, first thing in main (before anything caches host_layout): what the Mac
+// app's Launch script does. The log goes to Documents/Logs, the profile is
+// Documents/Profile (both reachable from the Files app), a fresh profile gets
+// the bundle's Defaults/, and the environment the packaged Mac app runs with.
+void platform_ui_ios_prepare();
+#endif
 
 // The game executable to load. Desktop: --exe, RECOMP_EXE, checkout, saved
 // path (may be empty: the caller shows the picker). iOS: Documents/game/<exe>,

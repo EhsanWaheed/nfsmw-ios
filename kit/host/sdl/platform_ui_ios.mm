@@ -3,6 +3,7 @@
 // developer build or from files the player chose), the launcher's platform,
 // and the app lifecycle mapped onto audio and presentation.
 #include "platform_ui.h"
+#include "ios_overlay.h"
 
 #include "../../platform/os.h"
 #include "../../runtime/layout.h"
@@ -10,6 +11,7 @@
 #include "../launcher/launcher_sdl.h"
 #include "../present.h"
 #include "game_config.h"
+#include "version.h"
 
 #import <CoreHaptics/CoreHaptics.h>
 #import <Foundation/Foundation.h>
@@ -39,7 +41,67 @@ std::string documents_dir() {
     return paths.count ? std::string([paths[0] fileSystemRepresentation]) : "";
 }
 
+// Keeps the `keep` newest *.log files in `dir`.
+void prune_logs(const fs::path &dir, size_t keep) {
+    std::vector<fs::directory_entry> logs;
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(dir, ec))
+        if (e.is_regular_file(ec) && e.path().extension() == ".log")
+            logs.push_back(e);
+    std::sort(logs.begin(), logs.end(), [](const auto &a, const auto &b) {
+        std::error_code e1, e2;
+        return a.last_write_time(e1) > b.last_write_time(e2);
+    });
+    for (size_t i = keep; i < logs.size(); ++i)
+        fs::remove(logs[i].path(), ec);
+}
+
 } // namespace
+
+void platform_ui_ios_prepare() {
+    const fs::path docs = documents_dir();
+    if (docs.empty())
+        return;
+    std::error_code ec;
+    // RECOMP_* switches first (Documents/switches.txt), so one can move the profile too.
+    recomp_env_apply_file((docs / "switches.txt").c_str());
+
+    // The log: stdout and stderr into Documents/Logs/<date>-<time>.log, the ten newest kept. A device has no
+    // console, and this is what a player can send (Files app, On My iPad / the app's folder).
+    const fs::path logs = docs / "Logs";
+    fs::create_directories(logs, ec);
+    prune_logs(logs, 9);
+    char stamp[32];
+    const time_t now = time(nullptr);
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
+    const std::string log = (logs / (std::string(stamp) + ".log")).string();
+    if (freopen(log.c_str(), "a", stderr)) {
+        setvbuf(stderr, nullptr, _IONBF, 0);
+        dup2(fileno(stderr), fileno(stdout));
+        setvbuf(stdout, nullptr, _IOLBF, 0);
+    }
+    fprintf(stderr, "[ios] %s %s, log %s\n", RECOMP_APP_NAME, POP_RECOMP_VERSION, log.c_str());
+
+    // The profile (registry, saves, settings) where the Files app reaches it, seeded from the bundle's Defaults
+    // the way the Mac app's Launch script seeds its own: a file the player already has is never replaced.
+    const char *profile_env = recomp_env("PROFILE_DIR");
+    const fs::path profile = profile_env && *profile_env ? fs::path(profile_env) : docs / "Profile";
+    if (!profile_env || !*profile_env)
+        setenv("RECOMP_PROFILE_DIR", profile.c_str(), 1);
+    fs::create_directories(profile, ec);
+    const fs::path defaults = fs::path(bundle_dir()) / "Defaults";
+    for (const char *name : {"registry.json", "mod-settings.json", "NativeOptions.ini"}) {
+        if (fs::exists(profile / name, ec) || !fs::is_regular_file(defaults / name, ec))
+            continue;
+        fs::copy_file(defaults / name, profile / name, ec);
+        fprintf(stderr, "[ios] profile: %s from the bundle's defaults%s\n", name, ec ? " FAILED" : "");
+    }
+    // The packaged Mac app's environment (tools/setup_kit/defaults/Launch); a switches.txt value wins.
+    setenv("RECOMP_D3D9_SCALE", "1", 0);
+    setenv("RECOMP_HOST_PRESENT_PACING", "duration", 0);
+    setenv("RECOMP_D3D9_SHADER_WARM_DIR", (profile / "ShaderWarm").c_str(), 0);
+    ios_overlay_apply_launch_settings(); // MetalFX markers, and the overlay's restart-only options
+}
 
 void platform_ui_init_hints() {
     // Landscape on every device (the Info.plist keys match): the game's picture
@@ -284,6 +346,8 @@ SDL_Window *platform_ui_create_window(const char *title, int, int, int, int,
         title, 0, 0, surface_flag | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (window_mode)
         *window_mode = 2;
+    if (w)
+        ios_overlay_install(w); // the iOS display menu, above the Metal view
     return w;
 }
 

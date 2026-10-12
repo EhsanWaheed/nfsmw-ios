@@ -237,8 +237,15 @@ extern "C" void mods_display_scene_domain(int w, int h) {
 extern "C" int mods_display_scene_width(int w, int h) {
     return !classic.load() && wide.load() && scene_h == h ? std::max(w, scene_w) : w;
 }
+// A host's own frame cap (the iOS overlay: 30/60/90/120) wins over the Frame limit row while it is set; 0 hands
+// the limit back to the row. The row's choices and saved value are untouched.
+static std::atomic<int> g_fps_override{0};
+extern "C" void mods_display_set_fps_override(int fps_cap) {
+    g_fps_override.store(std::clamp(fps_cap, 0, 480));
+}
 extern "C" int mods_display_fps() {
-    return fps.load();
+    const int o = g_fps_override.load();
+    return o > 0 ? o : fps.load();
 }
 extern "C" void mods_display_texture_pack(uint32_t replacements, int terrain_detail) {
     pack_contents = replacements ? 1 : terrain_detail ? 2 : 0;

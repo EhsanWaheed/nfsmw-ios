@@ -89,6 +89,27 @@ function(pop_ios_bundle target)
               $<TARGET_BUNDLE_CONTENT_DIR:${target}>/symbols.json
       VERBATIM)
   endif()
+  # What a game's setup builds beside the app and its Mac package adds (NFSMW: tools/setup_kit/package.py):
+  # the files it generated from the player's own game (build/generated: effect programs, light pools) into the
+  # core mod's folder, and the first-run profile (registry, mod settings, NativeOptions.ini) into Defaults/,
+  # which platform_ui_ios_prepare seeds a fresh profile from. Each only when the game has it.
+  if(EXISTS ${POP_BUILD_ROOT}/generated AND EXISTS ${RECOMP_GAME_DIR}/mods/core/${RECOMP_GAME_ID})
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${POP_BUILD_ROOT}/generated
+              $<TARGET_BUNDLE_CONTENT_DIR:${target}>/mods/core/${RECOMP_GAME_ID}
+      COMMENT "Bundling the effects the setup generated (build/generated)"
+      VERBATIM)
+  endif()
+  set(defaults_dir ${RECOMP_GAME_DIR}/tools/setup_kit/defaults)
+  foreach(f ${defaults_dir}/registry.json ${defaults_dir}/mod-settings.json
+            ${RECOMP_GAME_DIR}/mods/core/${RECOMP_GAME_ID}/NativeOptions.ini)
+    if(EXISTS ${f})
+      get_filename_component(name ${f} NAME)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${f} $<TARGET_BUNDLE_CONTENT_DIR:${target}>/Defaults/${name}
+        VERBATIM)
+    endif()
+  endforeach()
   # Last, so it overrides the signing set above: the sideloader (SideStore,
   # LiveContainer) signs the app and its embedded dylibs with its own identity.
   if(RECOMP_IOS_UNSIGNED)

@@ -24,6 +24,7 @@ int mods_display_wide(void);
 void mods_display_scene_domain(int w, int h);
 int mods_display_scene_width(int guest_w, int guest_h);
 int mods_display_fps(void);      /* 0 original, otherwise requested new-frame limit */
+void mods_display_set_fps_override(int fps_cap); /* a host's own cap (iOS overlay); 0 = the Frame limit row */
 int mods_display_overlay(void);  /* 0 off, 1 counters, 2 frame-time graph */
 int mods_display_textures(void); /* 0 original, 1 HD pack */
 /* What the renderer's texture pack holds, once opened: replacement textures

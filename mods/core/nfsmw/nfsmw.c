@@ -631,6 +631,9 @@ PopModStatus pop_mod_init(const PopModApi *api) {
         (s = install(0x00529280u, native_audio_destroy, POP_HOOK_BEFORE, 39)) != POP_OK)
         return s;
     int64_t rate = setting("sim_rate", 60);
+    /* NFSMW_SIM_RATE (the iOS overlay's experimental 120 Hz simulation, applied at launch) wins over the setting. */
+    if (getenv("NFSMW_SIM_RATE") && atoi(getenv("NFSMW_SIM_RATE")) > 0)
+        rate = atoi(getenv("NFSMW_SIM_RATE"));
     if (rate < 30)
         rate = 30;
     if (rate > 480)

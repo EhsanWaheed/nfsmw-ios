@@ -68,6 +68,7 @@
 #endif
 #if TARGET_OS_IPHONE
 #include <os/proc.h>
+#include "ios_overlay.h"
 #endif
 
 #include <math.h>
@@ -2113,6 +2114,9 @@ int main(int argc, char **argv) {
             SDL_Log("[android] game data: %s", game.exe.c_str());
     }
 #else
+#if TARGET_OS_IPHONE
+    platform_ui_ios_prepare(); // the log, the profile and its defaults, before host_layout is cached
+#endif
     GamePath game = platform_ui_resolve_game(exe_flag, &game_error);
 #endif
     if (!game_error.empty()) {
@@ -2169,7 +2173,12 @@ int main(int argc, char **argv) {
     }
     os_audio_on_service_restart(audio_service_restarted);
     // While the settings page is up it owns the pad; the game sees nothing held.
+#if TARGET_OS_IPHONE
+    // ...and so does the iOS display menu (ios_overlay.h).
+    controls::gamepad_set_suppressed_query([] { return mods_page_visible() || ios_overlay_visible(); });
+#else
     controls::gamepad_set_suppressed_query([] { return mods_page_visible(); });
+#endif
 
     g_gpu = gpu::create_default_device();
     if (!g_gpu) {
