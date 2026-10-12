@@ -37,9 +37,18 @@ That's about 2.8 GB. You don't need anything else (`.dll` files, the uninstaller
 ### Install
 
 1. Install `SpeedRecomp-NGF.ipa` with [LiveContainer](https://github.com/LiveContainer/LiveContainer) or SideStore
-   (iOS 17 or later).
-2. Put your game folder (or a ZIP of it) on the device, for example in the Files app or iCloud Drive.
-3. Open the app and choose that folder or ZIP when it asks. The import runs once.
+   (iOS 17 or later), and open it once so its Documents folder exists.
+2. Put the files above in a folder named exactly **`game`**, so you have `game/speed.exe`, `game/CARS`,
+   `game/GLOBAL` and so on.
+3. Copy that **`game`** folder into the app's **Documents** folder (Files app, or Finder with the device plugged in):
+   - **SideStore** (installed as a normal app): Files → On My iPhone → **Need for Speed: Most Wanted** → put
+     `game` there.
+   - **LiveContainer**: Files → On My iPhone → **LiveContainer** → `Data` → `Application` → the app's data folder
+     (its name is shown in LiveContainer's settings for the app) → **`Documents`** → put `game` there.
+4. Open the app. It finds `Documents/game` and starts the game.
+
+Prefer not to copy files by hand? Open the app without a `game` folder and it offers to import one: choose your
+game folder or a ZIP of it, wherever it is (Files, iCloud Drive), and it copies it into `Documents/game` for you.
 
 ### Settings
 

@@ -252,7 +252,8 @@ Open the settings menu with **F10** (Fn+F10 on a laptop), the controller's touch
 | PlayStation-style buttons | `ps2_controls` | on | at once | The default controller layout: Cross accelerates and Triangle goes back, like the PlayStation version. Change any driving button in the game's Options > Controls. |
 | Triggers as pedals | `trigger_pedals` | off | at once | R2 accelerates and L2 brakes (both analog), like most modern racing games. |
 | L3 skips music track | `l3_skip_track` | on | at once | Clicking the left stick skips to the next music track, like the T key. |
-| PlayStation button icons | `ps_icons` | on | after a restart | Shows PlayStation button symbols in the menus. Restart to apply. |
+| Controller button icons | `ps_icons` | on | after a restart | Shows the controller's button symbols in the menus once you use it (off: the keyboard prompts). Restart to apply. |
+| Button icon style | `pad_glyphs` | Match controller | at once | Which button symbols the menus show. Match controller: PlayStation symbols for a DualSense, DualShock or a PlayStation-edition controller, Xbox letters for others. |
 | Shift up button | `shift_up` | 7 | at once | Controller button for shifting up (manual gears). -1 turns it off. 7 is R2. See the guide for other numbers. |
 | Shift down button | `shift_down` | 6 | at once | Controller button for shifting down (manual gears). -1 turns it off. 6 is L2. See the guide for other numbers. |
 | Shift up: second button | `shift_up_secondary` | -1 | at once | An extra button for shifting up. -1 turns it off. |
@@ -283,3 +284,4 @@ Kept so that older profiles load cleanly, or fixed by the port; the menu does no
 | `appearance` | Definitive (default) | Definitive: the console-style look this port is built around. PC - Original: the PC game exactly as it was. Custom: Definitive with your own changes below. |
 | `dof_scene_depth` | on | Retired from the menu in 2.0: always on (off only lost the blur in some rain frames). |
 | `x360_exposure` | on | Retired from the menu in 2.0: always on (off also broke the HDR highlight mark). |
+| `pad_kind` | 0 | Set by the app when a controller connects (1 PlayStation, 2 Xbox and others). Not a choice. |
