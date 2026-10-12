@@ -212,9 +212,17 @@ void note_screen_size() {
     g_screen_h.store(h);
 #if TARGET_OS_IPHONE
     // The mods' screen_size (the core mod's Auto resolution) reads this record; without it Auto falls back
-    // to 1280x720, which boxes a 16:9 picture on a 4:3 iPad and leaves MetalFX nothing to scale up.
+    // to 1280x720, which boxes a 16:9 picture on a 4:3 iPad. It is the screen's shape at the iOS panel's output
+    // height (RECOMP_IOS_OUTPUT_ROWS, ios_overlay.mm; 0 the screen's own): the whole frame, menus included,
+    // costs GPU time per pixel, and the screen's full size more than doubled it on an iPhone.
     int lw = 0, lh = 0;
     host_landscape_screen_size(w, h, &lw, &lh);
+    const char *rows_env = getenv("RECOMP_IOS_OUTPUT_ROWS");
+    const int rows = rows_env ? atoi(rows_env) : 0;
+    if (rows > 0 && rows < lh) {
+        lw = int(std::lround(double(lw) * rows / lh)) & ~1;
+        lh = rows & ~1;
+    }
     host_display_set_screen(lw, lh);
 #endif
 }

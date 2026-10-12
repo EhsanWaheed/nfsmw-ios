@@ -11,14 +11,17 @@
 // The pack's layout is the one the game's own packs use (GLOBAL/GLOBALB.BUN, GlobalTexturesPC.tpk): a
 // 0xB3300000 container with the 0xB3310000 header part (pack info 0x33310001, the sorted hash table
 // 0x33310002, 124-byte texture infos 0x33310004, 32-byte format records 0x33310005) and the 0xB3320000 data
-// part (0x33320001, then 0x33320002 whose texel data starts 0x80-aligned). Every texture is 128x128 DXT3
+// part (0x33320001, then 0x33320002 whose texel data starts 0x80-aligned). Every texture is 64x64 DXT3
 // with one level, the format of the game's own menu icons (PC_KEY_ENTER).
 import CoreGraphics
 import CoreText
 import Foundation
 import ImageIO
 
-let size = 128
+// The art is drawn in a 128-unit square; the textures are `size` texels (64: the menus draw these icons at about
+// 48 pixels at the iOS 720p output, and the game's packs carry no smaller levels to filter a bigger one down).
+let art = 128
+let size = 64
 
 // ---- the game's string hash (bStringHash) ----------------------------------------------------------------
 func bHash(_ s: String) -> UInt32 {
@@ -41,10 +44,10 @@ extension CGContext {
     func stroke(_ c: RGBA) { setStrokeColor(red: c.r, green: c.g, blue: c.b, alpha: c.a) }
 }
 
-let mid = CGFloat(size) / 2
+let mid = CGFloat(art) / 2
 
 func disc(_ ctx: CGContext) {
-    let r = CGRect(x: 4, y: 4, width: size - 8, height: size - 8)
+    let r = CGRect(x: 4, y: 4, width: art - 8, height: art - 8)
     ctx.fill(discFill)
     ctx.fillEllipse(in: r)
     ctx.stroke(discRing)
@@ -54,7 +57,7 @@ func disc(_ ctx: CGContext) {
 
 // A cap for a shoulder (rounded below) or a trigger (rounded above), the way the pads draw them.
 func cap(_ ctx: CGContext, trigger: Bool) {
-    let r = CGRect(x: 6, y: 22, width: size - 12, height: size - 44)
+    let r = CGRect(x: 6, y: 22, width: art - 12, height: art - 44)
     let big: CGFloat = 34, small: CGFloat = 12
     let p = CGMutablePath()
     // CoreGraphics' origin is bottom-left: "above" is larger y.
@@ -222,6 +225,7 @@ func render(_ draw: (CGContext) -> Void) -> [UInt8] {
     // A bitmap context's first row in memory is the picture's top (the texture's first row), with y up in
     // the drawing, so the art above draws as it reads.
     ctx.setShouldAntialias(true)
+    ctx.scaleBy(x: CGFloat(size) / CGFloat(art), y: CGFloat(size) / CGFloat(art))
     draw(ctx)
     let bleed = [UInt8(discFill.r * 255), UInt8(discFill.g * 255), UInt8(discFill.b * 255)]
     for i in stride(from: 0, to: px.count, by: 4) {

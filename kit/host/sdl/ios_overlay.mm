@@ -26,8 +26,9 @@ NSString *const kRows = @"ios.internalRows";         // scene height in pixels; 
 NSString *const kFps = @"ios.frameCap";              // 30, 60, 90 or 120
 NSString *const kDynamic = @"ios.dynamicResolution"; // step down while the device is hot
 NSString *const kStretch = @"ios.stretch";           // fill the screen whatever the game's aspect
+NSString *const kOutput = @"ios.outputRows";        // the game's own resolution (its height); 0 the screen's
 NSString *const kEffects = @"ios.effectsInternal";   // TEST: glow/DoF/blur before the upscale (restart)
-NSString *const kSim120 = @"ios.simulation120";      // TEST: 120 Hz simulation (restart)
+NSString *const kSim120 = @"ios.simulation120";      // retired: a 120 Hz simulation crashed races; forced off
 
 // The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp), looked up by key each
 // time: the mods declare them while the game boots, after the panel exists.
@@ -65,6 +66,11 @@ void set_mod_setting(const char *key, int64_t value) {
 
 constexpr int kMinRows = 540; // dynamic resolution never goes below this
 const int kRowSteps[] = {540, 600, 720, 900, 1080, 1440};
+// The game's output heights. 720 is the default everywhere: every pixel of the frame (menus, HUD, effects) costs
+// GPU time, and the screen's full size more than doubled the frame's cost on an iPhone 17 Pro Max (30-45 fps).
+const int kOutputSteps[] = {720, 900, 1080};
+constexpr int kDefaultOutput = 720;
+int g_launch_output = kDefaultOutput; // the output height this launch uses (ios_overlay_apply_launch_settings)
 const int kFpsSteps[] = {30, 60, 90, 120};
 
 std::atomic<bool> g_visible{false};
@@ -162,7 +168,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UILabel *footerStatus;
 @property(nonatomic) UIButton *apply, *discard;
 @property(nonatomic) UISegmentedControl *resolution, *frameCap;
-@property(nonatomic) UISwitch *dynamic, *stretch, *effects, *sim120;
+@property(nonatomic) UISegmentedControl *output;
+@property(nonatomic) UILabel *outputNote;
+@property(nonatomic) UISwitch *dynamic, *stretch, *effects;
 @property(nonatomic) UILabel *status;
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
@@ -177,7 +185,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @implementation RecompIosOverlay {
     std::vector<int> _rows; // the resolution choices, ascending; 0 (native) last
     std::vector<int> _fps;  // the frame caps this display can show
-    int _nativeRows;
+    int _nativeRows; // the back buffer's height: the output resolution in effect
+    int _screenRows;
+    std::vector<int> _outputs; // the output choices, ascending; 0 (the screen's own) last
     int _appliedRows;
     NSInteger _tab;
     uint64_t _menuGeneration;
@@ -196,7 +206,13 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     // native height is the screen's shorter side in pixels.
     UIScreen *screen = window.windowScene.screen ?: window.screen;
     const CGSize px = screen.nativeBounds.size;
-    _nativeRows = (int)std::min(px.width, px.height);
+    _screenRows = (int)std::min(px.width, px.height);
+    // The back buffer is the screen's shape at the output height chosen at launch (main.cpp note_screen_size).
+    _nativeRows = g_launch_output > 0 && g_launch_output < _screenRows ? g_launch_output : _screenRows;
+    for (int r : kOutputSteps)
+        if (r < _screenRows)
+            _outputs.push_back(r);
+    _outputs.push_back(0);
     for (int r : kRowSteps)
         if (r < _nativeRows)
             _rows.push_back(r);
@@ -205,14 +221,14 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     for (int f : kFpsSteps)
         if (f <= maxFps)
             _fps.push_back(f);
-    // First run: the largest step at most 60% of the screen's rows (720p on an iPhone, 900p-1080p on an iPad),
-    // which MetalFX brings up to the screen; every frame of the HUD and menus is native anyway.
+    // First run: the largest step at most 85% of the output height (600p at the 720p output), which MetalFX
+    // brings up to it.
     int defaultRows = _rows.front();
     for (int r : _rows)
-        if (r && r <= _nativeRows * 0.6)
+        if (r && r <= _nativeRows * 0.85)
             defaultRows = r;
     [defaults() registerDefaults:@{kRows : @(defaultRows), kFps : @60, kDynamic : @YES, kStretch : @NO,
-                                   kEffects : @NO, kSim120 : @NO}];
+                                   kEffects : @NO}];
     _appliedRows = -2;
     _tab = TAB_HOME;
     [self buildPanel];
@@ -225,8 +241,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [self applyResolution];
     [self applyFrameCap];
     host_compositor_set_stretch([defaults() boolForKey:kStretch]);
-    fprintf(stderr, "[ios] overlay: native %d rows, display up to %ld Hz, thermal %ld\n", _nativeRows, (long)maxFps,
-            (long)NSProcessInfo.processInfo.thermalState);
+    fprintf(stderr, "[ios] overlay: output %d rows (screen %d), display up to %ld Hz, thermal %ld\n", _nativeRows,
+            _screenRows, (long)maxFps, (long)NSProcessInfo.processInfo.thermalState);
     return self;
 }
 
@@ -316,6 +332,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     l.adjustsFontForContentSizeCategory = YES;
     l.textColor = UIColor.labelColor;
     l.numberOfLines = 0;
+    // Text wraps rather than widening its row.
+    [l setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     return l;
 }
 
@@ -440,8 +458,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [panel.contentView addSubview:column];
 
     UILayoutGuide *safe = root.safeAreaLayoutGuide;
+    // The width is the panel's own (700 points, or the screen's less a margin): nothing inside may resize it, or a
+    // long line (a controller's name) squeezes every tab into a narrow column.
     NSLayoutConstraint *preferredWidth = [panel.widthAnchor constraintEqualToConstant:700];
-    preferredWidth.priority = UILayoutPriorityDefaultHigh;
+    preferredWidth.priority = UILayoutPriorityRequired - 1;
     // As tall as the content wants, within the screen: the scroll view takes the rest.
     NSLayoutConstraint *fitHeight = [self.scroll.heightAnchor constraintEqualToAnchor:body.heightAnchor];
     fitHeight.priority = UILayoutPriorityDefaultLow;
@@ -449,6 +469,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         [panel.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
         [panel.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
         preferredWidth,
+        [panel.widthAnchor constraintLessThanOrEqualToConstant:700],
         [panel.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-24],
         [panel.heightAnchor constraintLessThanOrEqualToAnchor:safe.heightAnchor constant:-16],
         fitHeight,
@@ -489,8 +510,22 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.dynamic = [self switchFor:kDynamic action:@selector(dynamicChanged:)];
     self.stretch = [self switchFor:kStretch action:@selector(stretchChanged:)];
     self.effects = [self switchFor:kEffects action:@selector(effectsChanged:)];
-    self.sim120 = [self switchFor:kSim120 action:@selector(sim120Changed:)];
     self.status = [self note:@""];
+
+    NSMutableArray *outputTitles = [NSMutableArray array];
+    NSInteger outputIndex = (NSInteger)_outputs.size() - 1;
+    const int savedOutput = (int)[defaults() integerForKey:kOutput];
+    for (size_t i = 0; i < _outputs.size(); ++i) {
+        const int r = _outputs[i];
+        [outputTitles addObject:r ? [NSString stringWithFormat:@"%dp", r] : [NSString stringWithFormat:@"Screen %dp", _screenRows]];
+        if (r == savedOutput)
+            outputIndex = (NSInteger)i;
+    }
+    self.output = [[UISegmentedControl alloc] initWithItems:outputTitles];
+    self.output.selectedSegmentIndex = outputIndex;
+    [self.output addTarget:self action:@selector(outputChanged:) forControlEvents:UIControlEventValueChanged];
+    self.outputNote = [self note:@""];
+    [self updateOutputNote];
 
     UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, or hold three fingers. The full F10 page: F10 or a "
                                @"three-finger tap."];
@@ -498,8 +533,13 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 
     NSArray *views = @[
         [self section:@"Display"],
-        [self label:@"Internal resolution: MetalFX upscales the 3D scene to the screen; the HUD and menus stay "
-                    @"sharp. Native draws everything at the screen's own size, without MetalFX."
+        [self label:@"Output resolution: the game's own resolution, shaped to the screen and scaled to fit. "
+                    @"Higher is sharper and slower; 720p keeps an iPhone at 60 fps and cool."
+              style:UIFontTextStyleSubheadline],
+        self.output,
+        self.outputNote,
+        [self label:@"3D resolution: MetalFX upscales the 3D scene to the output; the HUD and menus stay at the "
+                    @"output resolution. Native draws the scene at the output resolution, without MetalFX."
               style:UIFontTextStyleSubheadline],
         self.resolution,
         [self row:@"Frame cap (fps)" control:self.frameCap],
@@ -512,14 +552,15 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                    control:self.stretch],
         self.status,
         [self section:@"Experimental (next launch)"],
-        [self row:@"Effects (glow, depth of field, motion blur) at internal resolution" control:self.effects],
-        [self row:@"Simulation at 120 Hz (for the 120 cap; off = 60 Hz)" control:self.sim120],
+        [self row:@"Effects (glow, depth of field, motion blur) at the 3D resolution" control:self.effects],
         hint,
     ];
     self.home = [[UIStackView alloc] initWithArrangedSubviews:views];
     self.home.axis = UILayoutConstraintAxisVertical;
     self.home.spacing = 12;
     [self.home setCustomSpacing:6 afterView:views[1]];
+    [self.home setCustomSpacing:4 afterView:views[2]];
+    [self.home setCustomSpacing:6 afterView:views[4]];
 }
 
 - (void)refreshStatus {
@@ -970,8 +1011,16 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (void)effectsChanged:(UISwitch *)s {
     [defaults() setBool:s.on forKey:kEffects];
 }
-- (void)sim120Changed:(UISwitch *)s {
-    [defaults() setBool:s.on forKey:kSim120];
+- (void)outputChanged:(UISegmentedControl *)c {
+    [defaults() setInteger:_outputs[(size_t)c.selectedSegmentIndex] forKey:kOutput];
+    [self updateOutputNote];
+}
+- (void)updateOutputNote {
+    const int chosen = (int)[defaults() integerForKey:kOutput];
+    const int next = chosen > 0 && chosen < _screenRows ? chosen : _screenRows;
+    self.outputNote.text = next == _nativeRows
+                               ? [NSString stringWithFormat:@"Now %dp.", _nativeRows]
+                               : [NSString stringWithFormat:@"Now %dp; %dp from the next launch.", _nativeRows, next];
 }
 - (void)tapOutside:(UITapGestureRecognizer *)g {
     UIView *hit = [self.root hitTest:[g locationInView:self.root] withEvent:nil];
@@ -1047,6 +1096,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         [self publishKind];
         if (self.root.hidden)
             return;
+        if (mods_page_visible()) { // the F10 page opened (Edit controls, a three-finger tap): it takes over
+            [self close];
+            return;
+        }
         if (_tab == TAB_HOME) {
             [self refreshStatus];
         } else if (_captureKey.empty()) {
@@ -1073,10 +1126,14 @@ void ios_overlay_apply_launch_settings() {
     host_upscale_set_rows(0);
     if ([d boolForKey:kEffects])
         setenv("RECOMP_UPSCALE_EFFECTS_INTERNAL", "1", 0);
-    if ([d boolForKey:kSim120])
-        setenv("NFSMW_SIM_RATE", "120", 0);
-    fprintf(stderr, "[ios] launch options: effects at internal resolution %s, simulation %s Hz\n",
-            [d boolForKey:kEffects] ? "ON (test)" : "off", [d boolForKey:kSim120] ? "120 (test)" : "60");
+    // The game's resolution (main.cpp note_screen_size reads it before the game boots).
+    [d registerDefaults:@{kOutput : @(kDefaultOutput)}];
+    g_launch_output = (int)[d integerForKey:kOutput];
+    setenv("RECOMP_IOS_OUTPUT_ROWS", std::to_string(g_launch_output).c_str(), 1);
+    // The 120 Hz simulation test crashed races (SIGSEGV at the start, 12 Oct): off, whatever was saved.
+    [d removeObjectForKey:kSim120];
+    fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s\n",
+            g_launch_output > 0 ? "" : "the screen's, ", g_launch_output, [d boolForKey:kEffects] ? "ON (test)" : "off");
 }
 
 void ios_overlay_install(SDL_Window *window) {
