@@ -11,6 +11,42 @@ There is no emulator, no Wine and no CrossOver.
 This project is not affiliated with or endorsed by Electronic Arts. *Need for Speed* and *Most Wanted* are
 trademarks of Electronic Arts Inc.
 
+## iPhone and iPad (this fork)
+
+This fork of [elforeign/nfs-most-wanted-mac](https://github.com/elforeign/nfs-most-wanted-mac) adds an iOS port.
+The test build (`SpeedRecomp-NGF.ipa`, from [Releases](https://github.com/EhsanWaheed/nfsmw-ios/releases)) contains
+**no game files**. You add your own copy of the game the first time you open it.
+
+### What you need
+
+**Your own PC copy of the game, version 1.3** (the *Black Edition*, or the original game updated with the official
+1.3 patch). Other versions will not work: the app checks your `speed.exe` and turns away anything else.
+
+From your game's install folder (usually `C:\Program Files\EA GAMES\Need for Speed Most Wanted`), copy:
+
+| Copy this | |
+|---|---|
+| `speed.exe` | the game itself (must be version 1.3) |
+| `CARS` `FRONTEND` `GLOBAL` `LANGUAGES` `MOVIES` `NIS` `SOUND` `TRACKS` | the game's data: all of these folders |
+| `CREDITS` `MEMCARD` `SUBTITLES` | small extras: copy them too |
+
+That's about 2.8 GB. You don't need anything else (`.dll` files, the uninstaller, `Support`, saves).
+
+**Easiest:** copy the whole install folder. The app ignores anything it doesn't use.
+
+### Install
+
+1. Install `SpeedRecomp-NGF.ipa` with [LiveContainer](https://github.com/LiveContainer/LiveContainer) or SideStore
+   (iOS 17 or later).
+2. Put your game folder (or a ZIP of it) on the device, for example in the Files app or iCloud Drive.
+3. Open the app and choose that folder or ZIP when it asks. The import runs once.
+
+### Settings
+
+Tap three fingers on the screen (or press L3+R3 on a controller, or Cmd+S on a keyboard) to open the settings. For
+a cool, smooth iPhone: **Output 720p**, **3D 600p**, **Frame cap 60**. Details and how it was built:
+**[docs/IOS_PORT.md](docs/IOS_PORT.md)**.
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.
