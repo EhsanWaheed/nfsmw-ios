@@ -1,0 +1,95 @@
+# Need for Speed: Most Wanted (2005) — Native for Apple Silicon Macs
+
+A native macOS build of the 2005 PC game, made by **static recompilation**: the game's own x86 code is translated to
+C ahead of time and compiled for Apple Silicon, with a Metal renderer, native audio and native controller support.
+There is no emulator, no Wine and no CrossOver.
+
+> **You need your own copy of the game.** This repository contains **no game code, executables, artwork, sound,
+> movies, tracks or texture packs**. The setup kit takes the files from **your** installation and builds the app on
+> **your** Mac. Nothing it builds is meant to be shared.
+
+This project is not affiliated with or endorsed by Electronic Arts. *Need for Speed* and *Most Wanted* are
+trademarks of Electronic Arts Inc.
+
+## Play it on your Mac
+
+1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.
+2. Download the **Setup app** (`NFS-Most-Wanted-Native-Setup` disk image) from the
+   [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest), open it, and choose your game folder.
+3. Click **Build**. About 10 minutes later on a recent Mac (longer on older ones) the game is in your Applications folder.
+
+The Setup app holds no game files: it builds the game on your Mac from your copy. Step by step, including the one-time
+"Open Anyway" for an app that is not notarized by Apple: **[Getting started](docs/GETTING_STARTED.md)**. You can
+also build in Terminal with `./setup.sh`.
+
+## What you get
+
+- Native Apple Silicon app (tested at 4K 60 fps on an M5 Pro MacBook Pro with HDR off; with HDR and 2x anti-aliasing
+  heavy rain is near the limit), any resolution and aspect ratio, true widescreen (field of view, HUD and minimap
+  moved out to the edges, widescreen movies fitted correctly).
+- **One Look setting:** **Definitive** (default), **Xbox 360** or **PC**. Definitive is every finished improvement:
+  rebuilt effects written for this port (glow, gentle auto brightness for tunnels, motion blur at speed, movie-style
+  depth of field), natural wet roads, road sun sheen, car and glass reflections, water, wall depth,
+  ambient occlusion, sun rays, lamp glow, softer shadows, soft particles, smooth leaves and fences, and a golden colour
+  filter to taste. *Xbox 360* is the console look rebuilt for this port; *PC* shows the game exactly as it shipped.
+  Every improvement also has its own switch.
+- **Day and weather cycles** (both optional): a slow day, and clear, overcast, rain and drying roads.
+- **Light pools** cast by the PC game's own street lamps and tunnel lights onto the road and walls.
+- Rear-view mirror: sharp HD picture, full scenery, car shadows, headlights and police lights, knocked-over props.
+- **Real HDR** for HDR TVs, and **anti-aliasing Off / 2x / 4x**.
+- **Audio:** the game's own 5.1 mix as Mono, Stereo or 5.1 PCM, switchable live, plus an optional **Dolby Digital
+  5.1** bitstream for TVs and soundbars that misplace multichannel PCM.
+- **Controllers:** DualSense tested over USB and Bluetooth (other controllers macOS supports should work), PlayStation-style layout and button icons, any
+  button remappable in the game's own Controls menu, analog triggers as pedals, rumble from the game's own
+  force-feedback in an Xbox 360 or PC style.
+- **Extra Options, built in:** Black Edition content, replay beaten Blacklist rivals, special vinyls, max-performance
+  shop button, 6 rival reward markers, longer profile names, starting cash, police heat levels 1–10, helicopter
+  takedown bounty, skip the music track while driving (T or L3), the bounty, prologue and Busted-scene fixes, the
+  World Map in races, subtitles, always rain, and optional unlock-everything, barrier removal and no catch-up.
+- Optional community packs you already own work too: the Xbox 360 Stuff Pack's **textures** and the
+  **XenonEffects** sparks and light trails. See the [companion guide](docs/COMPANION_GUIDE.md).
+
+What's new in 2.0 and the known issues: [companion guide](docs/COMPANION_GUIDE.md#whats-new-in-20).
+
+## Get started
+
+1. Read **[Getting started](docs/GETTING_STARTED.md)**: what you need, then the Setup app (or one Terminal command).
+2. Then the **[companion guide](docs/COMPANION_GUIDE.md)**: playing, the F10 settings menu, controllers, audio,
+   and adding the optional mods.
+3. Problems: **[Troubleshooting](docs/TROUBLESHOOTING.md)**. All settings: **[Settings](docs/SETTINGS.md)**.
+
+## How it works
+
+The translator, runtime, Direct3D 9 → Metal renderer, audio and input hosts are
+[recomp-kit](https://github.com/veritr1x/recomp-kit) by veritr1x, included in `kit/` with this port's changes; this game's configuration started as
+veritr1x's [nfsmw-recomp](https://github.com/veritr1x/nfsmw-recomp). This repository adds the fixes, features and
+setup kit that make it a complete, playable Mac game: `game.toml` (the game's identity, addresses and translation
+fixes), `native/` (native replacements for a few game functions), `mods/core/nfsmw/` (the core mod: widescreen,
+settings, effects, controls, audio, Extra Options), `effects/` (the rebuilt effects' shader programs, assembled at
+setup by `tools/effects/`) and `tools/setup_kit/` (the setup). The Xbox 360 look is our own rebuild: the console
+version was studied as a reference only, and none of its code, shaders or files are included.
+
+You provide your own game folder, including its `speed.exe`. The setup checks that the exe is one the port can use
+before it builds anything.
+
+## Credits
+
+This port is built on **recomp-kit** and **nfsmw-recomp** by **veritr1x**.
+
+Community mods this port learned from or works with, and the people their readmes credit:
+
+- **Extra Options** — ExOpts Team
+- **Need for Speed Most Wanted (2005) – Xbox 360 Stuff Pack 4.2** (its textures) — "by a bunch of people", including
+  osdever, SpeedyHeart, MaxHwoy, Kevin4e, Aero_ and Xanvier
+- **NFS HD Reflections** — Aero_; based on Extra Options by the ExOpts Team; thanks to osdever
+- **NFS XtendedInput** — xan1242 (Lovro Pleše) and Berkay Yiğit; button icons by Aero_ (AeroWidescreen); injector by
+  LINK/2012
+- **NFSMW XenonEffects** — xan1242 (Lovro Pleše)
+- **NFS Most Wanted Widescreen Fix** — ThirteenAG
+- **TexWizard** — R-033; thanks to nlgxzef
+
+No code from these mods is included; their behaviour is reimplemented natively. Licence notices are in [NOTICE](NOTICE).
+
+## Licence
+
+MIT licence (see [LICENSE](LICENSE)).
