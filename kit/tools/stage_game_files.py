@@ -9,6 +9,7 @@ bundle from the copy it already made.
 import argparse
 import fnmatch
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -32,13 +33,23 @@ def kept(cfg):
     return [m["name"] for m in cfg.get("aux_modules", [])]
 
 
+def walk(source):
+    """Every directory and file under `source`, following symbolic links: a
+    setup often links the game's folders in from where the player installed it,
+    and Path.rglob does not descend into a linked directory."""
+    out = []
+    for root, dirs, files in os.walk(source, followlinks=True):
+        out += [Path(root) / name for name in dirs + files]
+    return sorted(out)
+
+
 def stage(source, dest, executable, exclude, keep=()):
     """Copy changed files only (size and mtime), remove nothing, write .stamp.
-    Returns the number of files copied."""
+    Returns the number of files copied. Links are copied as what they point to."""
     source, dest = Path(source), Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     copied = 0
-    for path in sorted(source.rglob("*")):
+    for path in walk(source):
         relative = path.relative_to(source)
         if excluded(relative, exclude, keep):
             continue

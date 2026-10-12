@@ -152,11 +152,13 @@ static void os_audio_render_tap(void *user, AudioQueueProcessingTapRef tap, UInt
         memset(data->mBuffers[b].mData, 0, data->mBuffers[b].mDataByteSize);
 }
 
+#if TARGET_OS_OSX // the audio HAL (AudioObject*) is macOS-only; iOS routes through AVAudioSession
 static bool os_audio_device_value(AudioObjectID device, AudioObjectPropertySelector selector,
                                   AudioObjectPropertyScope scope, void *value, UInt32 size) {
     const AudioObjectPropertyAddress address{selector, scope, kAudioObjectPropertyElementMain};
     return !AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, value);
 }
+#endif
 
 // This notification permits storage reuse. It is deliberately NOT counted as
 // sound reaching the speakers: queued/converted and presented are distinct.
@@ -544,7 +546,7 @@ void os_audio_output_close(OsAudioOutput *output) {
 #endif
 }
 
-#ifdef __APPLE__
+#if TARGET_OS_OSX
 static void (*volatile g_os_audio_service_restart)(void);
 static OSStatus os_audio_service_restarted(AudioObjectID, UInt32, const AudioObjectPropertyAddress *, void *) {
     if (void (*callback)(void) = g_os_audio_service_restart)
@@ -553,7 +555,7 @@ static OSStatus os_audio_service_restarted(AudioObjectID, UInt32, const AudioObj
 }
 #endif
 void os_audio_on_service_restart(void (*callback)(void)) {
-#ifdef __APPLE__
+#if TARGET_OS_OSX
     static bool added = false;
     g_os_audio_service_restart = callback;
     if (added || !callback)
@@ -577,6 +579,23 @@ int os_audio_output_route(OsAudioOutput *output, OsAudioRoute *route) {
         return output->provider->route(output->provided, route);
     if (!output || !output->queue)
         return -1;
+#if !TARGET_OS_OSX
+    // iOS has no device objects to name: the queue follows the session's route,
+    // and only what the queue itself reports is known.
+    {
+        route->follows_default = 1;
+        Float64 rate = 0;
+        UInt32 channels = 0, size = sizeof rate;
+        if (!AudioQueueGetProperty(output->queue, kAudioQueueDeviceProperty_SampleRate, &rate, &size))
+            route->device_rate = rate;
+        size = sizeof channels;
+        if (!AudioQueueGetProperty(output->queue, kAudioQueueDeviceProperty_NumberChannels, &channels,
+                                   &size))
+            route->device_channels = channels;
+        route->pipeline_frames = output->tap ? 2 * output->tap_max_frames : 0;
+        return -1;
+    }
+#else
     CFStringRef uid = nullptr;
     UInt32 size = sizeof uid;
     AudioObjectID device = kAudioObjectUnknown;
@@ -641,6 +660,7 @@ int os_audio_output_route(OsAudioOutput *output, OsAudioRoute *route) {
     // ahead (8192 frames for 4096-frame slices) instead of about one I/O period.
     route->pipeline_frames = output->tap ? 2 * output->tap_max_frames : 0;
     return 0;
+#endif // TARGET_OS_OSX
 #else
     (void)output;
     return -1;

@@ -76,6 +76,16 @@ class Source {
     virtual bool move_to(const Entry &, const std::string &) {
         return false;
     }
+    // Copies the entry's file to `target` as a copy-on-write clone (APFS: no
+    // bytes written, no space used until either side changes); false when the
+    // source cannot, and the caller copies instead.
+    virtual bool clone_to(const Entry &, const std::string &) {
+        return false;
+    }
+    // True when clone_to is worth trying, so an import needs no free space up front.
+    virtual bool clones() const {
+        return false;
+    }
 };
 std::unique_ptr<Source> folder_source(const std::string &root);
 // A ZIP by path, or by an open descriptor the source then owns (Android's

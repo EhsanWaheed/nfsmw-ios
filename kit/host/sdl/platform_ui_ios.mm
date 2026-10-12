@@ -42,12 +42,12 @@ std::string documents_dir() {
 } // namespace
 
 void platform_ui_init_hints() {
-    // iPhones rotate freely to portrait; iPads stay landscape (the Info.plist
-    // keys above match, so the OS never offers portrait to an iPad).
-    SDL_SetHint(SDL_HINT_ORIENTATIONS,
-                UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad
-                    ? "LandscapeLeft LandscapeRight"
-                    : "LandscapeLeft LandscapeRight Portrait");
+    // Landscape on every device (the Info.plist keys match): the game's picture
+    // fills the screen edge to edge with no portrait letterbox.
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    // The game's Auto resolution is the display's own pixel size, so the HUD and
+    // menus draw at native and only the 3D scene is upscaled (MetalFX).
+    setenv("RECOMP_AUTO_RESOLUTION_NATIVE", "1", 0);
     // The mapper turns fingers into mouse and key events itself.
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");

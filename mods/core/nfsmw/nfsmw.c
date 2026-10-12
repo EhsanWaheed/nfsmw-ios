@@ -849,6 +849,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
         api->log(api, "core.nfsmw: effects unavailable (hook)");
         g_pfx_enabled = 0;
     }
+    upscale_install_end_late(api);   /* RECOMP_UPSCALE_EFFECTS_INTERNAL=1 only: the scene ends after pfx_frame */
     /* ...and the main view's colour pass writes alpha (the HDR scene mark) and gives up its depth surface. */
     if (g_pfx_enabled && install_at(0x006de210u, 0x006ded21u, pfx_view_colour, POP_HOOK_BEFORE, 72) != POP_OK)
         api->log(api, "core.nfsmw: effects: colour-pass hook unavailable; no HDR mark, depth of field from the bound depth");

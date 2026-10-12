@@ -33,6 +33,7 @@
 #include "../hdr_convert.h"   // PLAN_R2 item 10 real HDR
 #include "../d3d9_trace.h"
 #include "../d3d9_capture.h"
+#include "../upscale_control.h"
 #include "remaster_tex.h"
 #include "remaster_cache.h"
 #include "grass.h"
@@ -71,6 +72,14 @@
 namespace {
 
 using namespace d9gpu;
+
+// host_upscale_set_rows (upscale_control.h): the scene height a host asked for; -1 not controlled. The last
+// upscaled scene's sizes are published for the host's menus. Read and written from any thread.
+std::atomic<int> g_upscale_rows{-1};
+std::atomic<uint64_t> g_upscale_in{0}, g_upscale_out{0};
+uint64_t pack_size(NSUInteger w, NSUInteger h) {
+    return (uint64_t(uint32_t(w)) << 32) | uint32_t(h);
+}
 
 // How a D3DFORMAT is stored in Metal.
 struct MtlFormat {
@@ -5171,7 +5180,19 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         if (copy_down)
             ++up_.bb_before;
         up_.pre_frame = 0;
-        const float s = bt->scale / upscale_factor_;
+        float s = bt->scale / upscale_factor_;
+        // A host's scene height (upscale_control.h) replaces the launch factor: the backing is that many physical
+        // rows, at most 4x below the back buffer; at or above the back buffer's own height the scene draws native.
+        if (const int rows = g_upscale_rows.load(std::memory_order_relaxed); rows >= 0) {
+            const float native_rows = bt->desc.height * bt->scale;
+            if (rows == 0 || rows >= native_rows - 0.5f) {
+                ++up_.native;
+                g_upscale_in.store(0);
+                g_upscale_out.store(0);
+                return;
+            }
+            s = std::max((float)rows, native_rows / 4.0f) / (float)bt->desc.height;
+        }
         if (!ensure_backing(*bt, s) || (dt && !ensure_backing(*dt, s))) {
             ++up_.failures;
             return;
@@ -5238,6 +5259,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         }
         upscale_compose(out, scene_z, up_.bb, up_.ds);
         ++up_.scaled;
+        g_upscale_in.store(pack_size(scene.width, scene.height));
+        g_upscale_out.store(pack_size(bt->texture.width, bt->texture.height));
     }
     // MTLFXSpatialScaler: scene -> a private output at the native size. Null when it could not run.
     id<MTLTexture> upscale_encode(id<MTLTexture> scene, id<MTLTexture> native) {
@@ -7121,7 +7144,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         float clr_rgba[4] = {}, clr_z = 0.0f;
         uint32_t clr_stencil_value = 0;
         uint64_t frames = 0, scaled = 0, skipped = 0, bb_before = 0, fitted = 0, failures = 0, nested = 0,
-                 stray_end = 0, refused = 0, no_end = 0, depth_mismatch = 0, replayed = 0, allocs = 0, aborts = 0;
+                 stray_end = 0, refused = 0, no_end = 0, depth_mismatch = 0, replayed = 0, allocs = 0, aborts = 0,
+                 native = 0; // scenes a host's height left at the back buffer's size
         id scaler = nil; // id<MTLFXSpatialScaler>
         id<MTLTexture> out = nil;
         NSUInteger sc_iw = 0, sc_ih = 0, sc_ow = 0, sc_oh = 0;
@@ -7337,6 +7361,25 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
 };
 
 } // namespace
+
+extern "C" void host_upscale_set_rows(int rows) {
+    const int before = g_upscale_rows.exchange(rows < 0 ? -1 : rows);
+    if (before != (rows < 0 ? -1 : rows))
+        fprintf(stderr, "[remaster] upscale: scene height %d%s\n", rows,
+                rows < 0 ? " (back to RECOMP_REMASTER_UPSCALE)" : rows == 0 ? " (native)" : " px");
+}
+
+extern "C" void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h) {
+    const uint64_t i = g_upscale_in.load(), o = g_upscale_out.load();
+    if (in_w)
+        *in_w = int(i >> 32);
+    if (in_h)
+        *in_h = int(uint32_t(i));
+    if (out_w)
+        *out_w = int(o >> 32);
+    if (out_h)
+        *out_h = int(uint32_t(o));
+}
 
 size_t host_d9_metal_fitted_depth_entries() {
     return g_fitted_depth_entries.load();

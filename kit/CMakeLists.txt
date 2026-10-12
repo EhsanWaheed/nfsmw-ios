@@ -109,7 +109,9 @@ add_compile_definitions(GUEST_HEAP_EXTRA_SIZE=${RECOMP_HEAP_EXTRA_SIZE})
 
 if(IOS)
   set(RECOMP_IOS_TEAM "$ENV{RECOMP_IOS_TEAM}" CACHE STRING "Apple development team for automatic signing")
-  if(RECOMP_IOS_TEAM STREQUAL "" AND NOT POP_TRANSLATE STREQUAL "STUB")
+  # An unsigned app for a re-signing sideloader (SideStore, LiveContainer): no team, no profile.
+  option(RECOMP_IOS_UNSIGNED "Build the iOS app unsigned, for a sideloader that signs it" OFF)
+  if(RECOMP_IOS_TEAM STREQUAL "" AND NOT RECOMP_IOS_UNSIGNED AND NOT POP_TRANSLATE STREQUAL "STUB")
     message(FATAL_ERROR "iOS builds need a signing team: set RECOMP_IOS_TEAM or pass tools/build.py --team; "
                         "`security find-identity -v -p codesigning` lists them")
   endif()

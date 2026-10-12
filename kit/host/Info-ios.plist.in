@@ -13,13 +13,14 @@
     <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>MinimumOSVersion</key><string>17.0</string>
-    <key>UIDeviceFamily</key><array><integer>2</integer></array>
+    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+    <key>CADisableMinimumFrameDurationOnPhone</key><true/>
     <key>UIRequiresFullScreen</key><true/>
     <key>UIStatusBarHidden</key><true/>
     <key>UIViewControllerBasedStatusBarAppearance</key><false/>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key>
-    <array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>CFBundleIcons</key>

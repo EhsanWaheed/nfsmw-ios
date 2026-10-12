@@ -143,6 +143,23 @@ def ios_app_bundle(app_name, build_root):
     return found[-1]
 
 
+def ios_ipa(app, build_root):
+    """Payload/<App>.app zipped as <build root>/ios/<App>.ipa, the layout SideStore and LiveContainer import.
+
+    ditto keeps the bundle's symlinks and permissions; the game files are already
+    compressed, so the archive is stored, not deflated (much faster, about as small)."""
+    ipa = Path(build_root) / "ios" / (app.stem + ".ipa")
+    with tempfile.TemporaryDirectory(dir=Path(build_root) / "ios") as tmp:
+        payload = Path(tmp) / "Payload"
+        payload.mkdir()
+        subprocess.run(["ditto", str(app), str(payload / app.name)], check=True)
+        if ipa.exists():
+            ipa.unlink()
+        subprocess.run(["ditto", "-c", "-k", "--keepParent", "--sequesterRsrc", "--zlibCompressionLevel", "0",
+                        str(payload), str(ipa)], check=True, cwd=tmp)
+    return ipa
+
+
 def install_and_launch(app, bundle_id, device, console):
     """Install the bundle with devicectl and launch it, optionally streaming its console."""
     subprocess.run(["xcrun", "devicectl", "device", "install", "app", "--device", device, str(app)], check=True)
@@ -415,6 +432,9 @@ def parse_args(argv, system=None):
     parser.add_argument("--device", default=None, help="devicectl identifier (iOS) or adb serial (Android)")
     parser.add_argument("--team", default=os.environ.get("RECOMP_IOS_TEAM", ""),
                         help="Apple team id for automatic signing (ios target; default $RECOMP_IOS_TEAM)")
+    parser.add_argument("--unsigned", action="store_true",
+                        help="iOS: build unsigned and package an .ipa for a sideloader that signs it "
+                             "(SideStore, LiveContainer); needs no team and installs nothing")
     parser.add_argument("--no-install", action="store_true", help="Build the mobile app without installing it")
     parser.add_argument("--push-game", action="store_true",
                         help="Android: push the configured game install minus [bundle].exclude before launch")
@@ -422,7 +442,9 @@ def parse_args(argv, system=None):
     args = parser.parse_args(argv)
     if args.push_game and (args.target != "android" or args.no_install):
         parser.error("--push-game requires --target android without --no-install")
-    if args.target == "ios" and not args.stub and not args.team:
+    if args.unsigned and args.target != "ios":
+        parser.error("--unsigned is for --target ios")
+    if args.target == "ios" and not args.stub and not args.unsigned and not args.team:
         parser.error("--target ios needs --team or RECOMP_IOS_TEAM")
     if args.stub and (args.config == "Debug" or args.regenerate):
         parser.error("--stub cannot be combined with --config Debug or --regenerate")
@@ -477,10 +499,16 @@ def main():
                 if not args.stub and not (args.build_root / "recomp/gen/table.c").is_file():
                     parser.error("No translation in %s/recomp/gen; run tools/build.py --regenerate on macOS first"
                                  % args.build_root)
-                configure(preset, defines + ["-DRECOMP_IOS_TEAM=" + args.team], build_dir=build_dir)
-                extra = ["--", "CODE_SIGNING_ALLOWED=NO"] if args.stub else ["--", "-allowProvisioningUpdates"]
+                configure(preset, defines + ["-DRECOMP_IOS_TEAM=" + args.team,
+                                             "-DRECOMP_IOS_UNSIGNED=" + ("ON" if args.unsigned else "OFF")],
+                          build_dir=build_dir)
+                unsigned = args.stub or args.unsigned
+                extra = ["--", "CODE_SIGNING_ALLOWED=NO"] if unsigned else ["--", "-allowProvisioningUpdates"]
                 build(preset, TARGETS["ios"], args.jobs, extra, build_dir=build_dir, config="Release")
-                if not args.stub and not args.no_install:
+                if args.unsigned and not args.stub:
+                    app = ios_app_bundle(cfg["game"]["app_name"], args.build_root)
+                    print("Unsigned app for sideloading: %s" % ios_ipa(app, args.build_root))
+                elif not args.stub and not args.no_install:
                     app = ios_app_bundle(cfg["game"]["app_name"], args.build_root)
                     device = args.device or pick_device(devicectl_list())
                     install_and_launch(app, cfg["game"]["bundle_id"], device, args.console)

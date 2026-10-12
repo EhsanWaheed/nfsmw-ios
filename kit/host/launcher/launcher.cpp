@@ -10,6 +10,12 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#if TARGET_OS_IPHONE
+#include <sys/clonefile.h>
+#endif
 
 namespace launcher {
 
@@ -435,6 +441,17 @@ class FolderSource final : public Source {
     bool move_to(const Entry &e, const std::string &target) override {
         return os_rename(join(root_, e.relative).c_str(), target.c_str()) == 0;
     }
+#if TARGET_OS_IPHONE
+    // The game bundled in the app and Documents/game sit on the same APFS
+    // volume, so the first-launch import of the bundled copy clones it: instant,
+    // and the game's files are not stored twice on the device.
+    bool clone_to(const Entry &e, const std::string &target) override {
+        return clonefile(join(root_, e.relative).c_str(), target.c_str(), CLONE_NOFOLLOW) == 0;
+    }
+    bool clones() const override {
+        return true;
+    }
+#endif
 
   private:
     void walk(const std::string &relative, std::vector<Entry> *out) {
@@ -702,8 +719,8 @@ ImportOutcome import_game(const Spec &spec, Source &source, const std::string &d
             needed += e.size;
     }
     uint64_t free_bytes = 0;
-    if (move)
-        needed = 0; // a move needs no room; if one falls back to a copy, the write reports it
+    if (move || source.clones())
+        needed = 0; // a move or clone needs no room; if one falls back to a copy, the write reports it
     if (os_free_space(dest.c_str(), &free_bytes) == 0 &&
         needed + spec.min_free_bytes > free_bytes) {
         out.result = ImportResult::NoSpace;
@@ -740,6 +757,16 @@ ImportOutcome import_game(const Spec &spec, Source &source, const std::string &d
         }
         mkdirs(parent_of(target));
         if (move && source.move_to(e, target)) {
+            ++out.files_copied;
+            p.bytes_done += e.size;
+            ++p.files_done;
+            report(true);
+            continue;
+        }
+        // A clone replaces whatever partial file an earlier import left; clonefile will not overwrite.
+        if (!move && source.clones() && (os_unlink(target.c_str()), source.clone_to(e, target))) {
+            if (e.mtime)
+                os_set_mtime(target.c_str(), e.mtime);
             ++out.files_copied;
             p.bytes_done += e.size;
             ++p.files_done;

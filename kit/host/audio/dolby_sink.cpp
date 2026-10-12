@@ -36,7 +36,11 @@
 #include "../../mods/pop_mod_api.h"
 #include "../../dx/host_api.h"
 
-#if defined(__APPLE__) && defined(RECOMP_HAVE_FFMPEG)
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+// macOS only: hog mode and device stream formats are audio HAL calls iOS does not have.
+#if defined(__APPLE__) && TARGET_OS_OSX && defined(RECOMP_HAVE_FFMPEG)
 #include <CoreAudio/CoreAudio.h>
 #include <pthread.h>
 #include <sys/qos.h>

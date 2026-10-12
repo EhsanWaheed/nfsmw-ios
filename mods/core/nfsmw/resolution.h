@@ -34,6 +34,13 @@ static void screen_shape(uint32_t *w, uint32_t *h) {
     uint32_t screen_w = 0, screen_h = 0;
     if (g_api->screen_size && g_api->screen_size(g_api, &screen_w, &screen_h) == POP_OK && screen_w &&
         screen_h) {
+        /* iOS (the host sets this): Auto is the display's own pixel size, with no 1080-row cap, so the
+         * HUD draws at native and MetalFX upscales only the 3D scene (upscale.h). */
+        if (getenv("RECOMP_AUTO_RESOLUTION_NATIVE")) {
+            *w = screen_w & ~1u;
+            *h = screen_h & ~1u;
+            return;
+        }
         float aspect = (float)screen_w / (float)screen_h;
         uint32_t rows = screen_h < 1080 ? screen_h : 1080;
         *h = rows;

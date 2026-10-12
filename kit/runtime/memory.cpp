@@ -354,7 +354,8 @@ void mem_init() {
     }
     void *p = os_vm_reserve(GUEST_SIZE);
     if (!p) {
-        fprintf(stderr, "[recomp] fatal: cannot map %u bytes of guest memory\n", GUEST_SIZE);
+        fprintf(stderr, "[recomp] fatal: cannot map %u bytes of guest memory (the system refused the "
+                        "reservation: out of address space or over the app's memory limit)\n", GUEST_SIZE);
         abort();
     }
     g_mem = (uint8_t *)p;

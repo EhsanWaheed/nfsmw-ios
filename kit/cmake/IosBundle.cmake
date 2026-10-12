@@ -11,7 +11,7 @@ function(pop_ios_bundle target)
     XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${RECOMP_IOS_TEAM}"
     XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
     XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
-    XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "2"
+    XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
     XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 17.0
     XCODE_ATTRIBUTE_ENABLE_BITCODE NO
     "XCODE_ATTRIBUTE_INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad"
@@ -88,5 +88,15 @@ function(pop_ios_bundle target)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${POP_BUILD_ROOT}/recomp/symbols.json
               $<TARGET_BUNDLE_CONTENT_DIR:${target}>/symbols.json
       VERBATIM)
+  endif()
+  # Last, so it overrides the signing set above: the sideloader (SideStore,
+  # LiveContainer) signs the app and its embedded dylibs with its own identity.
+  if(RECOMP_IOS_UNSIGNED)
+    set_target_properties(${target} PROPERTIES
+      XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO
+      XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED NO
+      XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+      XCODE_ATTRIBUTE_DEVELOPMENT_TEAM ""
+      XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY NO)
   endif()
 endfunction()

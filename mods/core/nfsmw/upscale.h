@@ -29,6 +29,7 @@ static int g_up_fnd;             /* run 14 foundation F1/F2: RECOMP_REMASTER_FOU
 static uint32_t g_up_cam_mem;    /* guest memory for the two SetTransform matrices (0x80 bytes) */
 static uint64_t g_up_cams;
 static int g_up_open;            /* a begin went out this frame */
+static int g_up_late_end;        /* RECOMP_UPSCALE_EFFECTS_INTERNAL=1: the end marker goes after the post chain */
 static int g_up_logged = -1;     /* the last state logged: 1 the world is upscaled, 2 the PC look stands aside */
 static uint64_t g_up_begins, g_up_ends, g_up_aside;
 
@@ -110,12 +111,21 @@ static void upscale_init(const PopModApi *api) {
     { const char *e = getenv("RECOMP_REMASTER_FOUNDATION"); g_up_fnd = e && *e == '1'; }   /* run 14 F1/F2 (TEST) */
     g_up_mode = (int)setting("upscale", 0);
     if (g_up_mode < 1 || g_up_mode > 2) g_up_mode = 0;
+    /* A host that drives the scene size itself (iOS: host_upscale_set_rows) asks for the markers by setting
+     * RECOMP_REMASTER_UPSCALE before the mods load; the setting being Off does not withhold them then. */
+    if (!g_up_mode && getenv("RECOMP_REMASTER_UPSCALE") && atof(getenv("RECOMP_REMASTER_UPSCALE")) >= 1.0)
+        g_up_mode = 2;
     if (!g_up_mode && !g_up_fnd) return;
     if (g_up_mode && !getenv("RECOMP_REMASTER_UPSCALE")) setenv("RECOMP_REMASTER_UPSCALE", g_up_mode == 1 ? "1.5" : "2", 0);
     if (g_up_mode && setting("upscale_temporal", 0) && !getenv("RECOMP_REMASTER_UPSCALE_TEMPORAL"))
         setenv("RECOMP_REMASTER_UPSCALE_TEMPORAL", "1", 0);
+    /* RECOMP_UPSCALE_EFFECTS_INTERNAL=1 (TEST, iOS menu; off by default): the scene ends after the post chain, so glow,
+     * depth of field and motion blur draw into the smaller scene backing before the upscale. The end marker is then
+     * installed by upscale_install_end_late, after pfx_frame on the same call (same-address hooks run in install order). */
+    g_up_late_end = getenv("RECOMP_UPSCALE_EFFECTS_INTERNAL") && *getenv("RECOMP_UPSCALE_EFFECTS_INTERNAL") == '1';
     const int ok = install_at(0x006de210u, 0x006ded21u, up_scene_begin, POP_HOOK_BEFORE, UPSCALE_SLOT_BEGIN) == POP_OK &&
-                   install_at(0x006c3870u, 0x006e75a6u, up_scene_end, POP_HOOK_BEFORE, UPSCALE_SLOT_END) == POP_OK;
+                   (g_up_late_end ||
+                    install_at(0x006c3870u, 0x006e75a6u, up_scene_end, POP_HOOK_BEFORE, UPSCALE_SLOT_END) == POP_OK);
     char line[200];
     if (g_up_mode)
         snprintf(line, sizeof line, "core.nfsmw: upscaling %s at launch (%s)%s%s", ok ? "on" : "UNAVAILABLE (hook)",
@@ -130,7 +140,19 @@ static void upscale_init(const PopModApi *api) {
             if (g_hooks[s]) { api->hook_remove(api, g_hooks[s]); g_hooks[s] = 0; }
         g_up_mode = 0;
         g_up_fnd = 0;
+        g_up_late_end = 0;
     }
+}
+/* After the post chain's hook (nfsmw.c): the end marker for RECOMP_UPSCALE_EFFECTS_INTERNAL=1. */
+static void upscale_install_end_late(const PopModApi *api) {
+    if (!g_up_late_end || (!g_up_mode && !g_up_fnd)) return;
+    if (install_at(0x006c3870u, 0x006e75a6u, up_scene_end, POP_HOOK_BEFORE, UPSCALE_SLOT_END) == POP_OK) {
+        api->log(api, "core.nfsmw: upscaling: effects draw at the scene size, before the upscale (TEST)");
+        return;
+    }
+    api->log(api, "core.nfsmw: upscaling UNAVAILABLE (late end hook); the scene stays native");
+    if (g_hooks[UPSCALE_SLOT_BEGIN]) { api->hook_remove(api, g_hooks[UPSCALE_SLOT_BEGIN]); g_hooks[UPSCALE_SLOT_BEGIN] = 0; }
+    g_up_mode = g_up_fnd = g_up_late_end = 0;
 }
 /* TEST ONLY evidence at exit: begins and ends must match (one each per world frame); aside counts PC-look frames. */
 static void upscale_exit(const PopModApi *api) {

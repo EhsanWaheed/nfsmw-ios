@@ -63,6 +63,12 @@
 #include <thread>
 #endif
 #include <SDL3/SDL_vulkan.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 
 #include <math.h>
 #include <stdio.h>
@@ -2125,6 +2131,33 @@ int main(int argc, char **argv) {
 #endif
         return 2;
     }
+#if TARGET_OS_IPHONE
+    // The guest arena is one GUEST_SIZE reservation (runtime/memory.cpp). iOS
+    // caps an app's address space and memory, and without the paid-team
+    // entitlements (increased memory limit, extended virtual addressing) the cap
+    // is the device default. Find out here, where a message can still be shown,
+    // instead of in mem_init's abort() with no window up.
+    {
+        const size_t available = os_proc_available_memory();
+        fprintf(stderr, "[ios] memory available to the app at launch: %zu MiB; guest arena %u MiB\n",
+                available >> 20, (unsigned)(GUEST_SIZE >> 20));
+        void *probe = os_vm_reserve(GUEST_SIZE);
+        if (!probe) {
+            char text[640];
+            snprintf(text, sizeof text,
+                     "iOS refused to reserve the %u MiB of address space the game runs in (%zu MiB of memory "
+                     "is available to this app right now).\n\n"
+                     "Close other apps and launch again. If it keeps happening, restart the device. In "
+                     "LiveContainer, turn on the increased memory limit for this app. A free Apple team "
+                     "cannot grant this app the extended memory entitlements itself.",
+                     (unsigned)(GUEST_SIZE >> 20), available >> 20);
+            fprintf(stderr, RECOMP_APP_NAME ": %s\n", text);
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Not enough memory", text, nullptr);
+            return 2;
+        }
+        os_vm_release(probe, GUEST_SIZE);
+    }
+#endif
     if (game.source == GamePathSource::Checkout &&
         os_chdir(host_layout().checkout_root.c_str()) != 0)
         fprintf(stderr, "[host] could not enter %s\n", host_layout().checkout_root.c_str());
