@@ -32,7 +32,9 @@ From your game's install folder (usually `C:\Program Files\EA GAMES\Need for Spe
 
 That's about 2.8 GB. You don't need anything else (`.dll` files, the uninstaller, `Support`, saves).
 
-**Easiest:** copy the whole install folder. The app ignores anything it doesn't use.
+**Easiest:** copy your whole game folder and name the copy **`game`**. Zip it, move the ZIP to your iPhone or iPad
+(AirDrop, iCloud Drive or a cable), unzip it in the Files app, then place the **`game`** folder in the app's
+Documents folder (where that is: see Install, step 3). The app ignores anything inside it doesn't use.
 
 ### Install
 
