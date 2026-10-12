@@ -57,6 +57,13 @@ clone of the app (`cp -cR`, then remove `game/`, `zip -9`). On first launch the 
 own game (a folder or ZIP from the Files app, or copied in with Finder). Note that the app still contains code
 translated from `speed.exe` and effect programs generated from the owner's game; sharing it is the owner's call.
 
+### Publishing (GitHub: EhsanWaheed/nfsmw-ios, public)
+
+The repository holds source only: `build/` (the translation of `speed.exe`, IPAs), `analysis/` (decompiled
+pseudocode), `original/` (the owner's game) and `*.ipa` are ignored. The only app package ever shared is
+`SpeedRecomp-NGF.ipa` (no game files), attached to a GitHub release, never committed; the full `SpeedRecomp.ipa`
+is the owner's own copy and stays private.
+
 ## What the iOS port has (October 2026)
 
 ### Settings panel (`kit/host/sdl/ios_overlay.mm`)

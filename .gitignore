@@ -65,3 +65,7 @@ CMakeUserPresets.json
 *.mus
 *.tpk
 *.asi
+
+# App packages: never committed. The full IPA carries the owner's game files; only the no-game-files
+# SpeedRecomp-NGF.ipa is shared, and only as a release download (docs/IOS_PORT.md).
+*.ipa
