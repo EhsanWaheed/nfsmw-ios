@@ -139,6 +139,21 @@ const ButtonRow *button_row(const std::string &label) {
     return nullptr;
 }
 
+// Home's Performance switches: the Definitive look's costliest extras, which the Detail level does not touch (it sets
+// only the game's own video values). Each is the core mod's own setting, as the Graphics tab shows it.
+struct PerfSwitch {
+    const char *key, *title;
+    bool restart;
+};
+const PerfSwitch kPerfSwitches[] = {
+    {"ssao", "Ambient occlusion (contact shadows)", false},
+    {"motion_blur", "Motion blur", false},
+    {"cinematic_dof", "Movie-style background blur", false},
+    {"mirror_full_scenery", "Mirror: all scenery (the mirror draws the world again)", false},
+    {"soft_shadows", "Softer shadows", true},
+    {"mirror_hd", "Mirror: sharp HD picture", true},
+};
+
 // The panel's tabs; the last three are the F10 menu's own pages.
 enum Tab { TAB_HOME, TAB_GRAPHICS, TAB_MODS, TAB_CONTROLS };
 int menu_tab(NSInteger t) {
@@ -173,6 +188,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UILabel *outputNote;
 @property(nonatomic) UISwitch *dynamic, *stretch, *effects;
 @property(nonatomic) UILabel *status;
+@property(nonatomic) NSArray<UISwitch *> *perf; // kPerfSwitches, by index (tag)
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
 @property(nonatomic) BOOL comboHeld, shortcutHeld;
@@ -530,6 +546,22 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.outputNote = [self note:@""];
     [self updateOutputNote];
 
+    NSMutableArray *perf = [NSMutableArray array], *perfRows = [NSMutableArray array];
+    for (size_t i = 0; i < sizeof kPerfSwitches / sizeof kPerfSwitches[0]; ++i) {
+        UISwitch *sw = [UISwitch new];
+        sw.tag = (NSInteger)i;
+        [sw addTarget:self action:@selector(perfChanged:) forControlEvents:UIControlEventValueChanged];
+        [perf addObject:sw];
+        NSString *title = [NSString stringWithUTF8String:kPerfSwitches[i].title];
+        if (kPerfSwitches[i].restart)
+            title = [title stringByAppendingString:@" (next launch)"];
+        [perfRows addObject:[self row:title control:sw]];
+    }
+    self.perf = perf;
+    UIStackView *perfStack = [[UIStackView alloc] initWithArrangedSubviews:perfRows];
+    perfStack.axis = UILayoutConstraintAxisVertical;
+    perfStack.spacing = 12;
+
     UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, or tap or hold three fingers. The full F10 page: F10."];
     hint.textColor = UIColor.tertiaryLabelColor;
 
@@ -553,6 +585,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                     detail:[self note:@"Off keeps the game's shape, with bars where the screen's differs."]
                    control:self.stretch],
         self.status,
+        [self section:@"Performance"],
+        [self note:@"The Definitive look's heaviest extras; the Detail level leaves these on. Turning them off keeps "
+                   @"the phone cooler. The PC look has none of them."],
+        perfStack,
         [self section:@"Experimental (next launch)"],
         [self row:@"Effects (glow, depth of field, motion blur) at the 3D resolution" control:self.effects],
         hint,
@@ -592,6 +628,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.footer.hidden = home;
     if (home) {
         mods_menu_close_headless();
+        [self refreshPerf];
         [self refreshStatus];
     } else {
         _menuGeneration = 0;
@@ -888,6 +925,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.bubbleTitle.numberOfLines = 1;
     self.bubbleDetail = [self note:@""];
     self.bubbleDetail.numberOfLines = 1;
+    // The bubble sizes itself to its text (up to 60% of the screen): its labels keep their width, unlike the panel's,
+    // which wrap ("Backbone One PlayStation® Edition" read "Back...").
+    for (UILabel *l in @[ self.bubbleTitle, self.bubbleDetail ])
+        [l setContentCompressionResistancePriority:UILayoutPriorityRequired - 1 forAxis:UILayoutConstraintAxisHorizontal];
+    self.bubbleTitle.lineBreakMode = NSLineBreakByTruncatingMiddle;
     UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:@[ self.bubbleTitle, self.bubbleDetail ]];
     text.axis = UILayoutConstraintAxisVertical;
     text.spacing = 1;
@@ -1027,6 +1069,20 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 }
 - (void)effectsChanged:(UISwitch *)s {
     [defaults() setBool:s.on forKey:kEffects];
+}
+- (void)perfChanged:(UISwitch *)sw {
+    set_mod_setting(kPerfSwitches[sw.tag].key, sw.on ? 1 : 0);
+}
+// The switches show the settings as they are (the Graphics tab or F10 may have changed them); not while one is
+// being changed, which the poll's next read shows anyway.
+- (void)refreshPerf {
+    for (UISwitch *sw in self.perf) {
+        int64_t v = 0;
+        const bool known = mod_setting(kPerfSwitches[sw.tag].key, nullptr, &v);
+        sw.enabled = known;
+        if (known && !sw.tracking)
+            sw.on = v != 0;
+    }
 }
 - (void)outputChanged:(UISegmentedControl *)c {
     [defaults() setInteger:_outputs[(size_t)c.selectedSegmentIndex] forKey:kOutput];
