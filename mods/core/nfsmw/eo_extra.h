@@ -303,7 +303,17 @@ static void eo_tod_cycle(const PopModApi *api) {
         if (g_tod_t > 0.95) g_tod_t = 0.05 + (g_tod_t - 0.95);
     }
     g_tod_last = now;
-    put_float(tod + 8, (float)g_tod_t);
+    /* RECOMP_TOD_STEPS=N (the iOS host: 1200): the game is given the time in N steps a day, not a new value every frame.
+     * Each frame's tiny sun move re-aims the shadow map, and at a phone's or tablet's resolution the shadow edges crawl
+     * over the cars like a flickering bulb (owner, 13 Oct, races only). 1200 steps: one every ~2.7 s of a 60-minute
+     * day, the sun moving ~0.15 degrees, so shadows stand still in between. Our own clock stays continuous. */
+    static int tod_steps = -1;
+    if (tod_steps < 0) {
+        const char *e = getenv("RECOMP_TOD_STEPS");
+        const int n = e ? atoi(e) : 0;
+        tod_steps = n >= 24 && n <= 100000 ? n : 0;
+    }
+    put_float(tod + 8, (float)(tod_steps ? floor(g_tod_t * tod_steps) / tod_steps : g_tod_t));
     static unsigned n;
     if (++n % (g_tod_speed != 1.0 ? 300u : 3600u) == 0) { /* every 5 s in a sped-up test */
         char line[80];

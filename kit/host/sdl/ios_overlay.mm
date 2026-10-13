@@ -1446,6 +1446,7 @@ void ios_overlay_apply_launch_settings() {
     setenv("RECOMP_UPSCALE_FRONTEND", "1", 0); // the menus' garage scene too, not only races
     setenv("RECOMP_FE_FIT_WIDE", "1", 0);      // the widescreen menus fit a 4:3 iPad (core mod video_modes.h)
     setenv("RECOMP_HIDE_GAME_CURSOR", "1", 0); // only the iPad's own pointer, not the game's arrow as well
+    setenv("RECOMP_TOD_STEPS", "1200", 0);     // the day cycle's sun moves in steps: steady car shadows in races
     host_upscale_set_rows(0);
     // The game's resolution (main.cpp note_screen_size reads it before the game boots).
     // Effects (glow, depth of field, motion blur) at the 3D resolution is the default: on an iPhone it saves GPU
