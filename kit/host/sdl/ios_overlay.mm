@@ -68,7 +68,7 @@ void set_mod_setting(const char *key, int64_t value) {
 }
 
 constexpr int kMinRows = 540; // dynamic resolution never goes below this
-const int kRowSteps[] = {540, 600, 720, 900, 1080, 1440};
+const int kRowSteps[] = {540, 600, 640, 720, 800, 900, 1080, 1440};
 // The game's output heights. 720 is the default everywhere: every pixel of the frame (menus, HUD, effects) costs
 // GPU time, and the screen's full size more than doubled the frame's cost on an iPhone 17 Pro Max (30-45 fps).
 const int kOutputSteps[] = {720, 900, 1080};
@@ -1445,6 +1445,7 @@ void ios_overlay_apply_launch_settings() {
     setenv("RECOMP_REMASTER_UPSCALE", "2", 0);
     setenv("RECOMP_UPSCALE_FRONTEND", "1", 0); // the menus' garage scene too, not only races
     setenv("RECOMP_FE_FIT_WIDE", "1", 0);      // the widescreen menus fit a 4:3 iPad (core mod video_modes.h)
+    setenv("RECOMP_HIDE_GAME_CURSOR", "1", 0); // only the iPad's own pointer, not the game's arrow as well
     host_upscale_set_rows(0);
     // The game's resolution (main.cpp note_screen_size reads it before the game boots).
     // Effects (glow, depth of field, motion blur) at the 3D resolution is the default: on an iPhone it saves GPU

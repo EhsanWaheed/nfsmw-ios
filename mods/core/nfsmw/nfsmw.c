@@ -599,6 +599,11 @@ static void settings_migrate(const PopModApi *api) {
     api->settings_set(api, "settings_version", 1);
 }
 
+static void hide_game_cursor(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv, void *user) {
+    (void)inv; (void)user;
+    api->hook_return(api, cpu, cpu->eax, 0);   /* cdecl: the caller pops its two arguments */
+}
+
 PopModStatus pop_mod_init(const PopModApi *api) {
     PopModStatus s;
     g_api = api;
@@ -752,6 +757,11 @@ PopModStatus pop_mod_init(const PopModApi *api) {
     if (getenv("NFSMW_TEST_MIRROR_LIGHT_LOG"))   /* TEST ONLY */
         install(0x00505380u, mirror_flare_count, POP_HOOK_BEFORE, 81);
     frontend_pad_init(api);
+    /* RECOMP_HIDE_GAME_CURSOR=1 (the iOS host): the game's own menu arrow (PC_CURSOR, drawn at the mouse position by
+     * 0056fdb0, cdecl, its only draw) is not drawn, so an iPad shows only its own pointer, not two. */
+    if (getenv("RECOMP_HIDE_GAME_CURSOR") && *getenv("RECOMP_HIDE_GAME_CURSOR") == '1' &&
+        install(0x0056fdb0u, hide_game_cursor, POP_HOOK_REPLACE, 148) == POP_OK)
+        api->log(api, "core.nfsmw: the game's own cursor is hidden (the device pointer shows instead)");
     if ((s = install(0x00516230u, frontend_pad_loaded, POP_HOOK_REPLACE, 20)) != POP_OK ||
         (s = install(0x005b85f0u, frontend_pad_tick, POP_HOOK_BEFORE, 21)) != POP_OK ||
         (s = install(0x00514cc0u, frontend_pad_visible, POP_HOOK_REPLACE, 22)) != POP_OK ||
