@@ -88,7 +88,9 @@ is the owner's own copy and stays private.
 A UIKit panel (Liquid Glass on iOS 26+) above the game, opened with L3+R3, Cmd+S, F10, the on-screen F10 button,
 or a three-finger tap or hold. It replaces the kit's F10 page on iOS: `mods_page_set_redirect`
 (`kit/mods/settings_page.cpp`) sends F10 and every request to open the page to the panel, so the page never draws
-(a three-finger tap no longer sends F10 either: `kit/host/input_touch.cpp`). Settings persist in NSUserDefaults (`ios.*` keys). Tabs:
+(a three-finger tap no longer sends F10 either: `kit/host/input_touch.cpp`). The page also never draws behind the panel:
+`mods_menu_render` (`kit/mods/settings_menu_draw.cpp`) requires the page itself to be open, since the headless model
+the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods and Controls tabs). Settings persist in NSUserDefaults (`ios.*` keys). Tabs:
 
 - **Home** (iOS-only settings):
   - *Output resolution* (720p default, 900p, 1080p, the screen's own; next launch): the game's own back buffer,
@@ -105,6 +107,12 @@ or a three-finger tap or hold. It replaces the kit's F10 page on iOS: `mods_page
     (`quality_presets.h` sets only the game's own video values): ambient occlusion, motion blur, background blur,
     mirror scenery (live), softer shadows and the HD mirror (next launch).
   - *Effects at internal resolution* (on by default; next launch): glow / DoF / blur before the upscale.
+  - *Max performance (experimental)* (v2.1; next launch, with a Liquid Glass restart card): for hotter or older
+    phones, aiming at 60 fps. `kMaxPerfRecipe`: Detail Low and every heavy extra off, the player's values saved in
+    `ios.maxPerfSaved` and put back when it goes off; dynamic resolution forced on. The Definitive look, not the PC
+    look: the PC look never upscales (`upscale.h`), so dynamic resolution could not help it. `RECOMP_IOS_LOW_POWER=1`
+    makes the host's event wait sleep through a sub-millisecond remainder instead of polling (`main.cpp` service).
+    The frame cap itself already sleeps (`native_frame_clock` retires the game's GetTickCount spin).
 - **Graphics / Mods / Controls**: the F10 menu's own pages drawn natively. `mods_menu_open_headless` /
   `mods_menu_close_headless` (`kit/mods/settings_menu.cpp`) open the menu as a model without drawing the page or
   taking the keyboard; the panel reads `mods_menu_snapshot` and acts with `mods_menu_pointer_line`. Apply/Discard

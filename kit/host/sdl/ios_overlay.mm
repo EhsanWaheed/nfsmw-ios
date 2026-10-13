@@ -30,6 +30,8 @@ NSString *const kOutput = @"ios.outputRows";        // the game's own resolution
 NSString *const kEffects = @"ios.effectsInternal";   // TEST: glow/DoF/blur before the upscale (restart)
 NSString *const kSim120 = @"ios.simulation120";      // retired: a 120 Hz simulation crashed races; forced off
 NSString *const kSeeded = @"ios.seededDetail";       // the first-run Detail level was set (once per install)
+NSString *const kMaxPerf = @"ios.maxPerformance";     // Max performance mode (next launch)
+NSString *const kMaxPerfSaved = @"ios.maxPerfSaved";  // the player's own values, put back when the mode goes off
 
 // The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp), looked up by key each
 // time: the mods declare them while the game boots, after the panel exists.
@@ -201,7 +203,32 @@ UIImage *dualsense_image(CGFloat width) {
     }];
 }
 
-// The panel's tabs; the last three are the F10 menu's own pages.
+// Max performance: for hotter or older phones (an iPhone 15 Pro Max held 55-60 fps with dips to 48 at "serious"); the
+// aim is 60 fps at least. The Definitive look, not the PC look: the PC look never upscales (upscale.h), so dynamic
+// resolution could not lower its 3D scene when the phone heats up; with what the PC look leaves out turned off here
+// (Xbox 360 textures and sky, light pools, smooth leaves) it costs about the same. Detail Low (the game's own lower
+// world detail and draw distance), and every costly extra off:
+// ambient occlusion, bloom and glow, motion and background blur, sun rays, soft particles, sparks, denser and Stuff
+// Pack smoke, lit smoke, half the rain, softer shadows, mirror detail, wet roads, water, glass, wall relief, light
+// pools. The resolution stays the player's (no lower than they chose), so the car keeps its look. The player's own
+// values are saved first and put back when the mode is turned off.
+struct PerfValue {
+    const char *key;
+    int64_t value;
+};
+const PerfValue kMaxPerfRecipe[] = {
+    {"look", 0},           {"quality", 0},          {"antialiasing", 0},       {"ssao", 0},
+    {"clean_effects", 0},  {"motion_blur", 0},      {"cinematic_dof", 0},      {"sun_rays", 0},
+    {"lamp_glow", 0},      {"soft_particles", 0},   {"xbox_particles", 0},     {"denser_smoke", 0},
+    {"stuffpack_smoke", 0}, {"lit_smoke", 0},       {"rain_amount", 50},       {"soft_shadows", 0},
+    {"fe_floor_shadows", 0}, {"mirror_shadows", 0}, {"mirror_car_shadows", 0}, {"mirror_hd", 0},
+    {"mirror_full_scenery", 0}, {"mirror_lights", 0}, {"road_sheen", 0},       {"wet_roads", 0},
+    {"pbr_facades", 0},    {"natural_water", 0},    {"natural_glass", 0},      {"clean_pools", 0},
+    {"atmosphere", 0},     {"vehicle_lights", 0},    {"x360_textures", 0},     {"x360_sky", 0},
+    {"remaster_a2c", 0},
+};
+
+// The panel's tabs; the last three are the game's settings pages.
 enum Tab { TAB_HOME, TAB_GRAPHICS, TAB_MODS, TAB_CONTROLS };
 int menu_tab(NSInteger t) {
     return t == TAB_GRAPHICS ? MENU_TAB_GRAPHICS : t == TAB_MODS ? MENU_TAB_MODS : MENU_TAB_CONTROLS;
@@ -236,6 +263,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UISwitch *dynamic, *effects;
 @property(nonatomic) UILabel *status;
 @property(nonatomic) NSArray<UISwitch *> *perf; // kPerfSwitches, by index (tag)
+@property(nonatomic) UISwitch *maxPerf;
+@property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
 @property(nonatomic) BOOL comboHeld, shortcutHeld;
@@ -622,11 +651,21 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         [perfRows addObject:[self row:title control:sw]];
     }
     self.perf = perf;
+    self.maxPerf = [self switchFor:kMaxPerf action:@selector(maxPerfChanged:)];
+    [perfRows insertObject:[self rowWithTitle:[self label:@"Max performance (experimental)" style:UIFontTextStyleHeadline]
+                                       detail:[self note:@"For hotter or older devices, aiming at 60 fps: Low detail "
+                                                         @"with every heavy effect off (shadows, smoke, particles, "
+                                                         @"bloom, blur, mirror detail) and dynamic resolution on. The "
+                                                         @"car keeps its HD textures and your resolution stays as you "
+                                                         @"set it. Your own settings come back when you turn it off. "
+                                                         @"Restart to apply."]
+                                      control:self.maxPerf]
+                   atIndex:0];
     UIStackView *perfStack = [[UIStackView alloc] initWithArrangedSubviews:perfRows];
     perfStack.axis = UILayoutConstraintAxisVertical;
     perfStack.spacing = 12;
 
-    UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, F10, or tap or hold three fingers."];
+    UILabel *hint = [self note:@"Open or close: tap or hold three fingers, L3+R3 on a controller, or ⌘S."];
     hint.textColor = UIColor.tertiaryLabelColor;
 
     NSArray *views = @[
@@ -709,7 +748,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     MenuSnapshot s;
     if (!mods_menu_open_headless(menu_tab(_tab)) || !mods_menu_snapshot(&s)) {
         [self.menu addArrangedSubview:[self note:mods_menu_enabled()
-                                                     ? @"The F10 settings page is open. Close it to use these tabs."
+                                                     ? @"These settings are busy. Close this panel and open it again."
                                                      : @"This game has no settings pages."]];
         self.footer.hidden = YES;
         return;
@@ -1140,6 +1179,113 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (void)effectsChanged:(UISwitch *)s {
     [defaults() setBool:s.on forKey:kEffects];
 }
+- (void)maxPerfChanged:(UISwitch *)sw {
+    NSUserDefaults *d = defaults();
+    [d setBool:sw.on forKey:kMaxPerf];
+    if (sw.on) {
+        // Keep the player's own values once (turning it on twice does not overwrite them with the mode's).
+        if (![d dictionaryForKey:kMaxPerfSaved]) {
+            NSMutableDictionary *saved = [NSMutableDictionary dictionary];
+            for (const PerfValue &v : kMaxPerfRecipe) {
+                int64_t cur = 0;
+                if (mod_setting(v.key, nullptr, &cur))
+                    saved[@(v.key)] = @(cur);
+            }
+            [d setObject:saved forKey:kMaxPerfSaved];
+        }
+        for (const PerfValue &v : kMaxPerfRecipe)
+            set_mod_setting(v.key, v.value);
+        // Heat is then met by the 3D resolution stepping down (to 540p at the most), not by dropped frames.
+        [d setBool:YES forKey:kDynamic];
+        self.dynamic.on = YES;
+        [self applyResolution];
+    } else {
+        NSDictionary *saved = [d dictionaryForKey:kMaxPerfSaved];
+        for (NSString *k in saved)
+            set_mod_setting(k.UTF8String, [saved[k] longLongValue]);
+        [d removeObjectForKey:kMaxPerfSaved];
+    }
+    fprintf(stderr, "[ios] overlay: max performance %s (restart to apply)\n", sw.on ? "on" : "off");
+    [self refreshPerf];
+    [self showRestartNotice:sw.on];
+}
+
+// A Liquid Glass card in the middle of the screen: the mode's settings take full effect after a restart.
+- (void)showRestartNotice:(BOOL)on {
+    [self.notice removeFromSuperview];
+    UIView *dim = [[UIView alloc] initWithFrame:self.window.bounds];
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
+    UIVisualEffectView *card = [[UIVisualEffectView alloc] initWithEffect:glass_effect(NO)];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    if (@available(iOS 26.0, *)) {
+        card.cornerConfiguration = [UICornerConfiguration configurationWithUniformRadius:[UICornerRadius fixedRadius:30]];
+    } else {
+        card.layer.cornerRadius = 30;
+        card.clipsToBounds = YES;
+    }
+    UIImageView *icon = [[UIImageView alloc]
+        initWithImage:[UIImage systemImageNamed:on ? @"bolt.circle.fill" : @"arrow.counterclockwise.circle.fill"]];
+    icon.tintColor = UIColor.systemOrangeColor;
+    icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:44];
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    UILabel *title = [self label:on ? @"Max performance is on" : @"Max performance is off" style:UIFontTextStyleTitle2];
+    title.textAlignment = NSTextAlignmentCenter;
+    UILabel *body = [self label:@"Restart the game so every setting applies: close it and open it again."
+                          style:UIFontTextStyleBody];
+    body.textAlignment = NSTextAlignmentCenter;
+    body.textColor = UIColor.secondaryLabelColor;
+    UIButton *close = [self button:@"Close game now" action:@selector(closeForRestart) tag:0 prominent:YES];
+    UIButton *later = [self button:@"Later" action:@selector(dismissNotice) tag:0 prominent:NO];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[ later, close ]];
+    buttons.spacing = 12;
+    buttons.distribution = UIStackViewDistributionFillEqually;
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ icon, title, body, buttons ]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentFill;
+    stack.spacing = 14;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card.contentView addSubview:stack];
+    [dim addSubview:card];
+    [NSLayoutConstraint activateConstraints:@[
+        [card.centerXAnchor constraintEqualToAnchor:dim.centerXAnchor],
+        [card.centerYAnchor constraintEqualToAnchor:dim.centerYAnchor],
+        [card.widthAnchor constraintEqualToConstant:380],
+        [stack.topAnchor constraintEqualToAnchor:card.contentView.topAnchor constant:26],
+        [stack.bottomAnchor constraintEqualToAnchor:card.contentView.bottomAnchor constant:-22],
+        [stack.leadingAnchor constraintEqualToAnchor:card.contentView.leadingAnchor constant:24],
+        [stack.trailingAnchor constraintEqualToAnchor:card.contentView.trailingAnchor constant:-24],
+    ]];
+    [self.window addSubview:dim];
+    self.notice = dim;
+    dim.alpha = 0;
+    card.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    [UIView animateWithDuration:0.4
+                          delay:0
+         usingSpringWithDamping:0.8
+          initialSpringVelocity:0.5
+                        options:0
+                     animations:^{
+                       dim.alpha = 1;
+                       card.transform = CGAffineTransformIdentity;
+                     }
+                     completion:nil];
+}
+- (void)dismissNotice {
+    UIView *n = self.notice;
+    self.notice = nil;
+    [UIView animateWithDuration:0.25 animations:^{ n.alpha = 0; } completion:^(BOOL done) { [n removeFromSuperview]; }];
+}
+// The settings are saved first (the store writes each change, and once more here); iOS has no relaunch, so the
+// player opens the game again from the Home Screen or LiveContainer.
+- (void)closeForRestart {
+    mods_settings_save();
+    [defaults() synchronize];
+    fprintf(stderr, "[ios] overlay: closing for a restart (max performance)\n");
+    exit(0);
+}
+
 - (void)perfChanged:(UISwitch *)sw {
     set_mod_setting(kPerfSwitches[sw.tag].key, sw.on ? 1 : 0);
 }
@@ -1308,6 +1454,10 @@ void ios_overlay_apply_launch_settings() {
     if ([d boolForKey:kEffects])
         setenv("RECOMP_UPSCALE_EFFECTS_INTERNAL", "1", 0);
     setenv("RECOMP_IOS_OUTPUT_ROWS", std::to_string(g_launch_output).c_str(), 1);
+    // Max performance: the host's event wait sleeps through the sub-millisecond tail of a frame wait instead of
+    // polling (kit/host/sdl/main.cpp service), so the CPU idles while it waits for the next frame.
+    if ([d boolForKey:kMaxPerf])
+        setenv("RECOMP_IOS_LOW_POWER", "1", 1);
     // The 120 Hz simulation test crashed races (SIGSEGV at the start, 12 Oct): off, whatever was saved.
     [d removeObjectForKey:kSim120];
     fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s\n",

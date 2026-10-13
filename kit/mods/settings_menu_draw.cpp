@@ -223,7 +223,9 @@ int mods_menu_render(int w, int h, uint64_t *generation, const uint8_t **pixels)
     if (!generation || !pixels || w <= 0 || h <= 0 || w > 8192 || h > 8192)
         return 0;
     MenuSnapshot m;
-    if (!mods_menu_snapshot(&m))
+    // Only the page itself is drawn: the menu open as a model for a host's own UI (mods_menu_open_headless, the
+    // iOS panel's tabs) has a snapshot too, and drew the page behind that UI.
+    if (!mods_menu_is_open() || !mods_menu_snapshot(&m))
         return 0;
     std::lock_guard lock(g_mu);
     const uint64_t key = (m.generation ^ (uint64_t(uint32_t(w)) << 40) ^ (uint64_t(uint32_t(h)) << 20)) +

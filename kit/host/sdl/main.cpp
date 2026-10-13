@@ -75,6 +75,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <atomic>
 #include <chrono>
@@ -1464,6 +1465,14 @@ void handle_event(const SDL_Event &event) {
 // means take what is already there and return; a real wait is a genuine sleep
 // inside SDL, which is what stops the host spinning while the guest waits.
 // Returns true when something changed the input state.
+bool low_power_wait() {
+    static const bool on = [] {
+        const char *e = getenv("RECOMP_IOS_LOW_POWER");
+        return e && *e == '1';
+    }();
+    return on;
+}
+
 int service(double seconds) {
     uint32_t before = host_input_notify_count();
     size_t queued_before = 0;
@@ -1475,7 +1484,13 @@ int service(double seconds) {
     bool first = true;
     for (;;) {
         bool got;
-        if (first && seconds > 0.0)
+        if (first && seconds > 0.0 && int(seconds * 1000.0) == 0 && low_power_wait()) {
+            // Under a millisecond left (RECOMP_IOS_LOW_POWER, the iOS panel's Max performance): sleep it out instead
+            // of polling, which the scheduler would call again and again until the frame's deadline.
+            const struct timespec ts = {0, long(seconds * 1e9)};
+            nanosleep(&ts, nullptr);
+            got = SDL_PollEvent(&event);
+        } else if (first && seconds > 0.0)
             got = SDL_WaitEventTimeout(&event, int(seconds * 1000.0));
         else
             got = SDL_PollEvent(&event);
