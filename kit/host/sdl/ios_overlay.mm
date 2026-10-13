@@ -25,7 +25,7 @@ namespace {
 NSString *const kRows = @"ios.internalRows";         // scene height in pixels; 0 native
 NSString *const kFps = @"ios.frameCap";              // 30, 60, 90 or 120
 NSString *const kDynamic = @"ios.dynamicResolution"; // step down while the device is hot
-NSString *const kStretch = @"ios.stretch";           // fill the screen whatever the game's aspect
+NSString *const kStretch = @"ios.stretch";           // retired: the output has the screen's shape; forced off
 NSString *const kOutput = @"ios.outputRows";        // the game's own resolution (its height); 0 the screen's
 NSString *const kEffects = @"ios.effectsInternal";   // TEST: glow/DoF/blur before the upscale (restart)
 NSString *const kSim120 = @"ios.simulation120";      // retired: a 120 Hz simulation crashed races; forced off
@@ -154,6 +154,53 @@ const PerfSwitch kPerfSwitches[] = {
     {"mirror_hd", "Mirror: sharp HD picture", true},
 };
 
+// A DualSense, drawn (UIKit has no picture of one): white body and grips, black centre, the touchpad with its blue
+// light bar, two sticks, the d-pad and the four face buttons. `size` is the width; it is two thirds as tall.
+UIImage *dualsense_image(CGFloat width) {
+    const CGSize size = CGSizeMake(width, width * 2 / 3);
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+      CGContextRef g = ctx.CGContext;
+      const CGFloat k = width / 120; // drawn in a 120 x 80 box
+      CGContextScaleCTM(g, k, k);
+      UIBezierPath *body = [UIBezierPath bezierPath];
+      [body moveToPoint:CGPointMake(30, 12)];
+      [body addCurveToPoint:CGPointMake(90, 12) controlPoint1:CGPointMake(48, 8) controlPoint2:CGPointMake(72, 8)];
+      [body addCurveToPoint:CGPointMake(114, 46) controlPoint1:CGPointMake(104, 14) controlPoint2:CGPointMake(111, 28)];
+      [body addCurveToPoint:CGPointMake(104, 76) controlPoint1:CGPointMake(118, 62) controlPoint2:CGPointMake(114, 76)];
+      [body addCurveToPoint:CGPointMake(84, 58) controlPoint1:CGPointMake(96, 76) controlPoint2:CGPointMake(92, 62)];
+      [body addCurveToPoint:CGPointMake(36, 58) controlPoint1:CGPointMake(70, 52) controlPoint2:CGPointMake(50, 52)];
+      [body addCurveToPoint:CGPointMake(16, 76) controlPoint1:CGPointMake(28, 62) controlPoint2:CGPointMake(24, 76)];
+      [body addCurveToPoint:CGPointMake(6, 46) controlPoint1:CGPointMake(6, 76) controlPoint2:CGPointMake(2, 62)];
+      [body addCurveToPoint:CGPointMake(30, 12) controlPoint1:CGPointMake(9, 28) controlPoint2:CGPointMake(16, 14)];
+      [body closePath];
+      [[UIColor colorWithWhite:0.96 alpha:1] setFill];
+      [body fill];
+      [[UIColor colorWithRed:0.11 green:0.11 blue:0.13 alpha:1] setFill];
+      [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(34, 34, 52, 20) cornerRadius:9] fill];
+      [[UIColor colorWithWhite:0.86 alpha:1] setFill];
+      [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(38, 13, 44, 22) cornerRadius:5] fill];
+      [[UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:1] setFill];
+      [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(37, 13, 2.5, 20) cornerRadius:1.2] fill];
+      [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(80.5, 13, 2.5, 20) cornerRadius:1.2] fill];
+      for (NSValue *v in @[ [NSValue valueWithCGPoint:CGPointMake(44, 47)], [NSValue valueWithCGPoint:CGPointMake(76, 47)] ]) {
+          const CGPoint c = v.CGPointValue;
+          [[UIColor colorWithWhite:0.30 alpha:1] setFill];
+          [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(c.x - 7, c.y - 7, 14, 14)] fill];
+          [[UIColor colorWithWhite:0.12 alpha:1] setFill];
+          [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(c.x - 4.5, c.y - 4.5, 9, 9)] fill];
+      }
+      [[UIColor colorWithWhite:0.55 alpha:1] setFill];
+      [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(19, 23, 6, 16) cornerRadius:1.5] fill];
+      [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(14, 28, 16, 6) cornerRadius:1.5] fill];
+      for (NSValue *v in @[ [NSValue valueWithCGPoint:CGPointMake(98, 23)], [NSValue valueWithCGPoint:CGPointMake(98, 37)],
+                            [NSValue valueWithCGPoint:CGPointMake(91, 30)], [NSValue valueWithCGPoint:CGPointMake(105, 30)] ]) {
+          const CGPoint c = v.CGPointValue;
+          [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(c.x - 3, c.y - 3, 6, 6)] fill];
+      }
+    }];
+}
+
 // The panel's tabs; the last three are the F10 menu's own pages.
 enum Tab { TAB_HOME, TAB_GRAPHICS, TAB_MODS, TAB_CONTROLS };
 int menu_tab(NSInteger t) {
@@ -186,7 +233,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UISegmentedControl *resolution, *frameCap;
 @property(nonatomic) UISegmentedControl *output;
 @property(nonatomic) UILabel *outputNote;
-@property(nonatomic) UISwitch *dynamic, *stretch, *effects;
+@property(nonatomic) UISwitch *dynamic, *effects;
 @property(nonatomic) UILabel *status;
 @property(nonatomic) NSArray<UISwitch *> *perf; // kPerfSwitches, by index (tag)
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
@@ -197,6 +244,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UIImageView *bubbleIcon;
 @property(nonatomic) UILabel *bubbleTitle, *bubbleDetail;
 @property(nonatomic) NSUInteger bubbleSerial;
+- (void)toggle;
+- (void)openOnTab:(NSInteger)tab;
 @end
 
 @implementation RecompIosOverlay {
@@ -257,7 +306,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [nc addObserver:self selector:@selector(controllerDisconnected:) name:GCControllerDidDisconnectNotification object:nil];
     [self applyResolution];
     [self applyFrameCap];
-    host_compositor_set_stretch([defaults() boolForKey:kStretch]);
+    // Stretch is retired (the output resolution has the screen's own shape, so there is nothing to stretch);
+    // a value saved by an earlier build is cleared.
+    [defaults() removeObjectForKey:kStretch];
+    host_compositor_set_stretch(0);
     fprintf(stderr, "[ios] overlay: output %d rows (screen %d), display up to %ld Hz, thermal %ld\n", _nativeRows,
             _screenRows, (long)maxFps, (long)NSProcessInfo.processInfo.thermalState);
     return self;
@@ -405,6 +457,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (UIButton *)button:(NSString *)title action:(SEL)action tag:(NSInteger)tag prominent:(BOOL)prominent {
     UIButtonConfiguration *c = prominent ? UIButtonConfiguration.filledButtonConfiguration
                                          : UIButtonConfiguration.grayButtonConfiguration;
+    if (@available(iOS 26.0, *))
+        c = prominent ? UIButtonConfiguration.prominentGlassButtonConfiguration
+                      : UIButtonConfiguration.glassButtonConfiguration;
     c.title = title;
     c.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
     c.buttonSize = UIButtonConfigurationSizeSmall;
@@ -421,18 +476,28 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (void)buildPanel {
     UIView *root = [[UIView alloc] initWithFrame:self.window.bounds];
     root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    root.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+    root.backgroundColor = [UIColor colorWithWhite:0 alpha:0.2];
     root.hidden = YES;
     UITapGestureRecognizer *outside = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapOutside:)];
     outside.cancelsTouchesInView = NO;
     [root addGestureRecognizer:outside];
 
-    UIVisualEffectView *panel =
-        [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark]];
+    // Liquid Glass (iOS 26+), tinted dark enough to keep the text readable over a busy game; a dark material below.
+    UIVisualEffect *material = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark];
+    if (@available(iOS 26.0, *)) {
+        UIGlassEffect *glass = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+        glass.tintColor = [UIColor colorWithWhite:0.05 alpha:0.45];
+        material = glass;
+    }
+    UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:material];
     panel.translatesAutoresizingMaskIntoConstraints = NO;
-    panel.layer.cornerRadius = 24;
-    panel.layer.cornerCurve = kCACornerCurveContinuous;
-    panel.clipsToBounds = YES;
+    if (@available(iOS 26.0, *)) {
+        panel.cornerConfiguration = [UICornerConfiguration configurationWithUniformRadius:[UICornerRadius fixedRadius:32]];
+    } else {
+        panel.layer.cornerRadius = 24;
+        panel.layer.cornerCurve = kCACornerCurveContinuous;
+        panel.clipsToBounds = YES;
+    }
     panel.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [root addSubview:panel];
 
@@ -527,7 +592,6 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [self.frameCap addTarget:self action:@selector(frameCapChanged:) forControlEvents:UIControlEventValueChanged];
 
     self.dynamic = [self switchFor:kDynamic action:@selector(dynamicChanged:)];
-    self.stretch = [self switchFor:kStretch action:@selector(stretchChanged:)];
     self.effects = [self switchFor:kEffects action:@selector(effectsChanged:)];
     self.status = [self note:@""];
 
@@ -562,7 +626,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     perfStack.axis = UILayoutConstraintAxisVertical;
     perfStack.spacing = 12;
 
-    UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, or tap or hold three fingers. The full F10 page: F10."];
+    UILabel *hint = [self note:@"Open or close: L3+R3, ⌘S, F10, or tap or hold three fingers."];
     hint.textColor = UIColor.tertiaryLabelColor;
 
     NSArray *views = @[
@@ -581,9 +645,6 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                     detail:[self note:@"Steps the 3D scene down as the device heats up (fair: one step, serious: "
                                       @"two, critical: 540p) and back up as it cools."]
                    control:self.dynamic],
-        [self rowWithTitle:[self label:@"Stretch to fill the screen" style:UIFontTextStyleBody]
-                    detail:[self note:@"Off keeps the game's shape, with bars where the screen's differs."]
-                   control:self.stretch],
         self.status,
         [self section:@"Performance"],
         [self note:@"The Definitive look's heaviest extras; the Detail level leaves these on. Turning them off keeps "
@@ -808,8 +869,21 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     } else {
         detail = @"Pair one in Settings > General > Game Controller, or plug one in.";
     }
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"gamecontroller.fill"]];
-    icon.tintColor = UIColor.systemOrangeColor;
+    // A DualSense for PlayStation controllers (and when none is connected), the controller symbol for the rest;
+    // a fixed size either way, so the image never stretches to fill the row.
+    UIImageView *icon = [UIImageView new];
+    if (!c || controller_kind(c) == 1) {
+        icon.image = dualsense_image(72);
+    } else {
+        icon.image = [UIImage systemImageNamed:@"gamecontroller.fill"];
+        icon.tintColor = UIColor.systemOrangeColor;
+        icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:34];
+    }
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[ [icon.widthAnchor constraintEqualToConstant:72],
+                                               [icon.heightAnchor constraintEqualToConstant:48] ]];
+    [icon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView *card = (UIStackView *)[self rowWithTitle:[self label:title style:UIFontTextStyleHeadline]
                                                    detail:[self note:detail]
                                                   control:nil];
@@ -1058,10 +1132,6 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [defaults() setInteger:_fps[(size_t)c.selectedSegmentIndex] forKey:kFps];
     [self applyFrameCap];
 }
-- (void)stretchChanged:(UISwitch *)s {
-    [defaults() setBool:s.on forKey:kStretch];
-    host_compositor_set_stretch(s.on);
-}
 - (void)dynamicChanged:(UISwitch *)s {
     [defaults() setBool:s.on forKey:kDynamic];
     [self applyResolution];
@@ -1114,6 +1184,14 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     mods_menu_close_headless(); // as closing the F10 page: an unapplied Graphics change is discarded
     self.root.hidden = YES;
     g_visible = false;
+}
+- (void)openOnTab:(NSInteger)tab {
+    _tab = tab;
+    self.tabs.selectedSegmentIndex = tab;
+    if (self.root.hidden)
+        [self open];
+    else
+        [self showTab:tab];
 }
 - (void)toggle {
     self.root.hidden ? [self open] : [self close];
@@ -1200,6 +1278,18 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 
 namespace {
 RecompIosOverlay *g_overlay;
+// mods_page_set_redirect: F10 (tab -1: toggle) and every request for the old settings page open this panel instead,
+// on the tab the page would have shown. Called on whichever thread delivered the key.
+void page_redirect(int tab) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (!g_overlay)
+          return;
+      if (tab < 0)
+          [g_overlay toggle];
+      else
+          [g_overlay openOnTab:tab == MENU_TAB_MODS ? TAB_MODS : tab == MENU_TAB_CONTROLS ? TAB_CONTROLS : TAB_GRAPHICS];
+    });
+}
 }
 
 void ios_overlay_apply_launch_settings() {
@@ -1208,6 +1298,7 @@ void ios_overlay_apply_launch_settings() {
     // from host_upscale_set_rows (the panel). Native until the panel applies the saved choice.
     setenv("RECOMP_REMASTER_UPSCALE", "2", 0);
     setenv("RECOMP_UPSCALE_FRONTEND", "1", 0); // the menus' garage scene too, not only races
+    setenv("RECOMP_FE_FIT_WIDE", "1", 0);      // the widescreen menus fit a 4:3 iPad (core mod video_modes.h)
     host_upscale_set_rows(0);
     // The game's resolution (main.cpp note_screen_size reads it before the game boots).
     // Effects (glow, depth of field, motion blur) at the 3D resolution is the default: on an iPhone it saves GPU
@@ -1229,6 +1320,7 @@ void ios_overlay_install(SDL_Window *window) {
     if (!uiwindow || g_overlay)
         return;
     g_overlay = [[RecompIosOverlay alloc] initWithWindow:uiwindow];
+    mods_page_set_redirect(page_redirect); // the iOS panel replaces the F10 page
 }
 
 bool ios_overlay_visible() {

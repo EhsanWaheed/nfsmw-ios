@@ -54,7 +54,8 @@ game folder or a ZIP of it, wherever it is (Files, iCloud Drive), and it copies 
 
 ### Settings
 
-Tap three fingers on the screen (or press L3+R3 on a controller, or Cmd+S on a keyboard) to open the settings. For
+Tap three fingers on the screen (or press L3+R3 on a controller, or Cmd+S or F10 on a keyboard) to open the
+settings. For
 a cool, smooth iPhone: **Output 720p**, **3D 600p**, **Frame cap 60**. Details and how it was built:
 **[docs/IOS_PORT.md](docs/IOS_PORT.md)**.
 

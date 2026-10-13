@@ -52,8 +52,11 @@ instead (the directory `build/cmake/ios-ninja` is configured already, same optio
 
 ### The testers' IPA (no game files)
 
-`build/ios/SpeedRecomp-NGF.ipa` (about 60 MB, "No Game Files"): the same app without `game/`. Made from an APFS
-clone of the app (`cp -cR`, then remove `game/`, `zip -9`). On first launch the launcher asks the tester for their
+`build/ios/NFSMWIOS-NGF.ipa` (about 60 MB, "No Game Files"): the same app without `game/`. Made from an APFS
+clone of the app (`cp -cR`, then remove `game/`), then **scrubbed**: the build paths in the binary and the FFmpeg
+dylibs carry the Mac's user name, so `/Users/<name>/` is replaced with a same-length `/Users/nfsmw-build/`, each
+binary re-signed ad hoc (`codesign -f -s -`), and the result checked for the owner's identifiers (none may remain)
+before `zip -9`. The owner's own copy with the game, `NFSMWIOS.ipa`, is packaged as in step 4 above and kept private. On first launch the launcher asks the tester for their
 own game (a folder or ZIP from the Files app, or copied in with Finder). Note that the app still contains code
 translated from `speed.exe` and effect programs generated from the owner's game; sharing it is the owner's call.
 
@@ -82,8 +85,10 @@ is the owner's own copy and stays private.
 
 ### Settings panel (`kit/host/sdl/ios_overlay.mm`)
 
-A UIKit panel above the game, opened with L3+R3, Cmd+S, or a three-finger tap or hold (on iOS a three-finger tap
-no longer sends F10: `kit/host/input_touch.cpp`). Settings persist in NSUserDefaults (`ios.*` keys). Tabs:
+A UIKit panel (Liquid Glass on iOS 26+) above the game, opened with L3+R3, Cmd+S, F10, the on-screen F10 button,
+or a three-finger tap or hold. It replaces the kit's F10 page on iOS: `mods_page_set_redirect`
+(`kit/mods/settings_page.cpp`) sends F10 and every request to open the page to the panel, so the page never draws
+(a three-finger tap no longer sends F10 either: `kit/host/input_touch.cpp`). Settings persist in NSUserDefaults (`ios.*` keys). Tabs:
 
 - **Home** (iOS-only settings):
   - *Output resolution* (720p default, 900p, 1080p, the screen's own; next launch): the game's own back buffer,
@@ -94,7 +99,8 @@ no longer sends F10: `kit/host/input_touch.cpp`). Settings persist in NSUserDefa
     at most 85% of the output (600p at 720p).
   - *Frame cap* 30/60/90/120 with a ProMotion rate hint.
   - *Dynamic resolution*: one 3D step down at thermal fair, two at serious, 540p at critical; back up as it cools.
-  - *Stretch to fill* (`host_compositor_set_stretch`, `kit/host/compositor.cpp`).
+  - (*Stretch to fill* was removed in v2: the output has the screen's own shape, so it had nothing to do; a saved
+    value is cleared and `host_compositor_set_stretch(0)` applied.)
   - *Performance*: switches for the Definitive look's heaviest extras, which the Detail presets do not touch
     (`quality_presets.h` sets only the game's own video values): ambient occlusion, motion blur, background blur,
     mirror scenery (live), softer shadows and the HD mirror (next launch).
@@ -118,6 +124,13 @@ The pad prompts once drew blank: `frontend_pad.h` swapped them to textures from 
   menus keep the keyboard prompts. The style follows `pad_glyphs` (0 match controller, 1 PlayStation, 2 Xbox) and
   `pad_kind` (hidden; the iOS host sets it from the controller: DualSense, DualShock and "PlayStation" names → 1).
 - A Liquid Glass bubble (`UIGlassEffect`, iOS 26+; blur below) names a controller as it connects or goes.
+
+### Menus on a 4:3 iPad
+
+The game's widescreen menu layout is forced on (`game.toml`), with some objects near the 16:9 edges (the TRAX song
+box, page titles). On a 4:3 screen they fell off the sides. With `RECOMP_FE_FIT_WIDE=1` (set by the iOS host)
+`mods/core/nfsmw/video_modes.h` scales the front end down just enough for a 742-unit band (854 - 2 x 56) to fit:
+0.86 at 4:3, nothing at 16:10 or wider. The in-race HUD and movies are not affected.
 
 ### MetalFX in the front end
 

@@ -193,6 +193,10 @@ void activate() {
 
 // The page owns the keyboard while it is open, which is why every key it acts
 // on is consumed: the game must not act on the same press.
+// mods_page_set_redirect: a host that draws its own settings UI (the iOS panel) is asked to show it instead
+// of the page, by F10 (-1: toggle) and by every request to open the page (the tab it would have opened).
+void (*g_page_redirect)(int tab) = nullptr;
+
 int32_t on_key(const PopModApi *, int32_t dik, int32_t, int32_t down, void *) {
     if (dik == 0x57) { // F11: native performance counters / graph / off
         if (down)
@@ -201,6 +205,10 @@ int32_t on_key(const PopModApi *, int32_t dik, int32_t, int32_t down, void *) {
         return 1;
     }
     if (dik == 0x44) { // DIK_F10, reserved
+        if (down && g_page_redirect) {
+            g_page_redirect(-1); // a host's own settings UI instead of the page (the iOS panel): toggle it
+            return 1;
+        }
         if (down && mods_menu_enabled()) {
             // The tabbed menu (game.toml [settings] page = "tabs") is the page.
             if (mods_menu_is_open())
@@ -301,7 +309,15 @@ void mods_page_init() {
     mods_input_add_key(MODS_OWNER_RUNTIME, on_key, nullptr, &id);
 }
 
+void mods_page_set_redirect(void (*fn)(int tab)) {
+    g_page_redirect = fn;
+}
+
 PopModStatus mods_page_open(const char *mod_id) {
+    if (g_page_redirect) {
+        g_page_redirect(mod_id && *mod_id ? MENU_TAB_MODS : MENU_TAB_GRAPHICS);
+        return POP_OK;
+    }
     if (mods_menu_enabled()) {
         // A mod asking for its own page lands on the Mods page; F10 on Graphics.
         const int tab = mod_id && *mod_id ? MENU_TAB_MODS : MENU_TAB_GRAPHICS;

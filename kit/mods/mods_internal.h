@@ -247,6 +247,9 @@ void mods_fill_host_api(PopModApi *api);
 
 void mods_page_init(void);
 PopModStatus mods_page_open(const char *mod_id);
+// A host's own settings UI instead of the page: F10 calls `fn(-1)` (toggle), a request to open the page calls
+// `fn(tab)` with the MenuTab it would have shown; the page itself never opens. Null restores the page.
+void mods_page_set_redirect(void (*fn)(int tab));
 void mods_options_request(void);
 void mods_page_close(void);
 bool mods_page_visible(void);

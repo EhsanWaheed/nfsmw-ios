@@ -138,6 +138,16 @@ static void apply_resolution(uint32_t w, uint32_t h) {
     g_fe_scale = fe * g_aspect / (4.0f / 3.0f);
     if (g_fe_scale > fe)
         g_fe_scale = fe;
+    /* RECOMP_FE_FIT_WIDE=1 (the iOS host): the forced widescreen layout puts some front-end objects near the 16:9
+     * frame's edges (the TRAX song box, page titles, about 56 units in from an 854-unit width). On a screen
+     * narrower than that, a 4:3 iPad, they fell off the sides; the front end is scaled down just enough that a
+     * 742-unit-wide (854 - 2 x 56) band fits: 0.86 at 4:3, nothing at 16:10 or wider. */
+    {
+        const char *fit = getenv("RECOMP_FE_FIT_WIDE");
+        const float need = fe * (480.0f * g_aspect) / 742.0f;
+        if (fit && *fit == '1' && need < g_fe_scale)
+            g_fe_scale = need;
+    }
     {
         /* 0.5 is the 4:3 frame's half size; the screen is aspect / (4/3) of
          * that wide and the picture 1 / FMV_PICTURE_HEIGHT of it tall. */
