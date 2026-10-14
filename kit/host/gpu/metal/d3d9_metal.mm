@@ -77,6 +77,10 @@ using namespace d9gpu;
 // upscaled scene's sizes are published for the host's menus. Read and written from any thread.
 std::atomic<int> g_upscale_rows{-1};
 std::atomic<uint64_t> g_upscale_in{0}, g_upscale_out{0};
+// host_d9_diag_set (upscale_control.h): the iOS panel's reflection test, live, for the flicker at 90/120 fps.
+// 1 holds the car reflection maps (draws and clears into cube faces are skipped, the last contents stay), 2 holds
+// the shadow maps (square depth textures the scene samples), 4 logs those passes, one line a frame for 600 frames.
+std::atomic<uint32_t> g_d9_diag{0};
 uint64_t pack_size(NSUInteger w, NSUInteger h) {
     return (uint64_t(uint32_t(w)) << 32) | uint32_t(h);
 }
@@ -1309,6 +1313,7 @@ class Renderer final : public D9Backend {
             upscale_abort(id); // Remaster run 13
         if (fnd_on_ && fnd_.bb && (id == fnd_.bb || id == fnd_.ds))
             fnd_drop(); // Remaster run 14 foundation
+        diag_shadow_ids_.erase(id); // the iOS reflection test: an id may come back as another texture
         if (id == up_.last_bb)
             up_.last_bb = 0;
         if (id == up_.last_ds)
@@ -2660,6 +2665,8 @@ class Renderer final : public D9Backend {
         ++stat_calls_;
         if (test_skip_label_ && d.label && !strncmp(d.label, test_skip_label_, strlen(test_skip_label_)))
             return;   // run 16 TEST ONLY (RECOMP_TEST_SKIP_LABEL=<label prefix>): which draws are which on screen
+        if (g_d9_diag.load(std::memory_order_relaxed) && diag_hold(d.target, false))
+            return;   // the iOS reflection test (g_d9_diag)
         if (softfx_on_ && !soft_done_ && d.label && !strncmp(d.label, "IDI_PARTICLES_FX/", 17) && enc_ &&
             !recomp_ab::old(recomp_ab::SOFTFX)) {
             soft_done_ = true;
@@ -2722,8 +2729,11 @@ class Renderer final : public D9Backend {
             bound[s] = t;
             auto decl = pp.samplers.find(s);
             const bool declared2d = decl == pp.samplers.end() || decl->second == d9sh::S_2D;
-            if (declared2d && t && t->texture && t->depth && t->desc.kind == HOST_D9_TEX_2D)
+            if (declared2d && t && t->texture && t->depth && t->desc.kind == HOST_D9_TEX_2D) {
                 variant.depth_mask |= (uint16_t)(1u << s);
+                if (g_d9_diag.load(std::memory_order_relaxed) && t->desc.width == t->desc.height)
+                    diag_shadow_ids_.insert(d.sampler_texture[s]);   // a shadow map (the iOS reflection test)
+            }
         }
         census(d, vs_key, ps_key, vp, pp, bound);   // run 13 (TEST ONLY, RECOMP_REMASTER_CENSUS=<dir>)
         if (fef_on_)   // run 13 front-end floor shadows: a WORLD receiver's clip-to-shadow matrix and map
@@ -4015,6 +4025,8 @@ class Renderer final : public D9Backend {
     void clear(const HostD9Target &target, const int32_t vp[4], uint32_t count,
                const int32_t *rects, uint32_t flags, uint32_t color, float z,
                uint32_t stencil) override {
+        if (g_d9_diag.load(std::memory_order_relaxed) && diag_hold(target, true))
+            return;   // the iOS reflection test (g_d9_diag)
         if (trace_)
             if (auto *e = trace_->event("clear_request", trace_context(),
                                         trace_texture(target.color[0].id))) {
@@ -4298,6 +4310,7 @@ class Renderer final : public D9Backend {
     }
     void present(uint32_t backbuffer, uint32_t w, uint32_t h) override {
         const uint32_t guest_w = w, guest_h = h;
+        diag_frame();
         if (fnd_on_)
             fnd_present(); // Remaster run 14 foundation: before the upscale's (the motion pass runs at the scene size)
         if (upscale_factor_ > 0.0f)
@@ -7243,6 +7256,52 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     std::unordered_map<uint64_t, bool> carpaint_ps_, carflow_vs_;
     std::unordered_map<uint64_t, bool> carenv_vs_;
     uint64_t carenv_draws_ = 0, carenv_frames_ = 0, carenv_fallback_ = 0, carenv_draws_at_present_ = 0;
+    // The iOS reflection test (g_d9_diag): this frame's passes into the car reflection maps (cube faces) and the
+    // shadow maps, and whether they were held.
+    std::unordered_set<uint32_t> diag_shadow_ids_;
+    uint32_t diag_cube_draws_ = 0, diag_cube_clears_ = 0, diag_cube_faces_ = 0, diag_shadow_draws_ = 0,
+             diag_shadow_clears_ = 0, diag_held_ = 0, diag_prev_ = 0, diag_log_left_ = 0;
+    uint64_t diag_frame_no_ = 0, diag_last_ns_ = 0;
+    // True: skip this draw or clear (its target is a held map). Counts it for the log either way.
+    bool diag_hold(const HostD9Target &t, bool clear) {
+        const uint32_t m = g_d9_diag.load(std::memory_order_relaxed);
+        Tex *c = t.color[0].id ? tex_ptr(t.color[0].id) : nullptr;
+        const bool cube = c && c->desc.kind == HOST_D9_TEX_CUBE;
+        const bool shadow = !cube && t.depth.id && diag_shadow_ids_.count(t.depth.id);
+        if (cube) {
+            ++(clear ? diag_cube_clears_ : diag_cube_draws_);
+            diag_cube_faces_ |= 1u << (t.color[0].face & 7);
+        } else if (shadow) {
+            ++(clear ? diag_shadow_clears_ : diag_shadow_draws_);
+        }
+        const bool hold = (cube && (m & 1)) || (shadow && (m & 2));
+        diag_held_ += hold;
+        return hold;
+    }
+    // At Present: the log line for the frame just drawn, then the counters start again.
+    void diag_frame() {
+        const uint32_t m = g_d9_diag.load(std::memory_order_relaxed);
+        if (m != diag_prev_) {
+            fprintf(stderr, "[ios] reflection test: reflections %s, shadows %s, log %s\n", m & 1 ? "HELD" : "live",
+                    m & 2 ? "HELD" : "live", m & 4 ? "on (600 frames)" : "off");
+            if ((m & 4) && !(diag_prev_ & 4))
+                diag_log_left_ = 600;
+            diag_prev_ = m;
+        }
+        const uint64_t now = os_monotonic_ns();
+        ++diag_frame_no_;
+        if ((m & 4) && diag_log_left_) {
+            --diag_log_left_;
+            fprintf(stderr, "[ios] reflection test: frame %llu +%.2f ms: reflection map draws %u clears %u faces %02x, "
+                            "shadow map draws %u clears %u (%zu maps), held %u\n",
+                    (unsigned long long)diag_frame_no_, diag_last_ns_ ? (now - diag_last_ns_) / 1e6 : 0.0,
+                    diag_cube_draws_, diag_cube_clears_, diag_cube_faces_, diag_shadow_draws_, diag_shadow_clears_,
+                    diag_shadow_ids_.size(), diag_held_);
+        }
+        diag_last_ns_ = now;
+        diag_cube_draws_ = diag_cube_clears_ = diag_cube_faces_ = diag_shadow_draws_ = diag_shadow_clears_ =
+            diag_held_ = 0;
+    }
     // Remaster run 13 front-end floor shadows (RECOMP_REMASTER_FEFLOOR=1; A/B switch fefloor; fef_capture above).
     // TEST ONLY: RECOMP_REMASTER_FEFLOOR_DEBUG=1 (same lookup, colour unchanged: must match the floor without it),
     // =2 (coordinates: green inside the map, darker where shadowed, red outside); RECOMP_REMASTER_FEFLOOR_K (0..1).
@@ -7367,6 +7426,10 @@ extern "C" void host_upscale_set_rows(int rows) {
     if (before != (rows < 0 ? -1 : rows))
         fprintf(stderr, "[remaster] upscale: scene height %d%s\n", rows,
                 rows < 0 ? " (back to RECOMP_REMASTER_UPSCALE)" : rows == 0 ? " (native)" : " px");
+}
+
+extern "C" void host_d9_diag_set(unsigned mask) {
+    g_d9_diag.store(mask, std::memory_order_relaxed);
 }
 
 extern "C" void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h) {

@@ -24,6 +24,10 @@ void host_upscale_set_rows(int rows);
 // physical pixels; 0 before one has (or while the scene draws native).
 void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h);
 
+// The iOS panel's reflection test (Metal renderer, live): 1 holds the car
+// reflection maps, 2 holds the shadow maps, 4 logs their passes for 600 frames.
+void host_d9_diag_set(unsigned mask);
+
 // The presenter's picture placement (host/compositor.cpp): 0 keeps the game's
 // aspect (bars where it differs from the screen's), 1 stretches it to fill.
 void host_compositor_set_stretch(int stretch);

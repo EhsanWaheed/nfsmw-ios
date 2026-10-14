@@ -264,6 +264,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UILabel *status;
 @property(nonatomic) NSArray<UISwitch *> *perf; // kPerfSwitches, by index (tag)
 @property(nonatomic) UISwitch *maxPerf;
+@property(nonatomic) NSArray<UISwitch *> *diag; // the reflection test: tag = its host_d9_diag_set bit, never saved
 @property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
@@ -665,6 +666,28 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     perfStack.axis = UILayoutConstraintAxisVertical;
     perfStack.spacing = 12;
 
+    // The reflection test: each switch holds one suspect still (or logs), live, so a rainy race at 90/120 fps shows
+    // which one the flicker follows.
+    NSMutableArray *diag = [NSMutableArray array], *diagRows = [NSMutableArray array];
+    const struct { unsigned bit; NSString *title, *detail; } diagItems[] = {
+        {1, @"Freeze car reflections", @"The reflection picture on every car stops updating."},
+        {2, @"Freeze shadow map", @"The sun's shadows stop updating."},
+        {4, @"Log reflection passes", @"Writes the next 600 frames to the log for me to read."},
+    };
+    for (const auto &item : diagItems) {
+        UISwitch *sw = [UISwitch new];
+        sw.tag = (NSInteger)item.bit;
+        [sw addTarget:self action:@selector(diagChanged:) forControlEvents:UIControlEventValueChanged];
+        [diag addObject:sw];
+        [diagRows addObject:[self rowWithTitle:[self label:item.title style:UIFontTextStyleBody]
+                                        detail:[self note:item.detail]
+                                       control:sw]];
+    }
+    self.diag = diag;
+    UIStackView *diagStack = [[UIStackView alloc] initWithArrangedSubviews:diagRows];
+    diagStack.axis = UILayoutConstraintAxisVertical;
+    diagStack.spacing = 12;
+
     UILabel *hint = [self note:@"Open or close: tap or hold three fingers, L3+R3 on a controller, or ⌘S."];
     hint.textColor = UIColor.tertiaryLabelColor;
 
@@ -691,6 +714,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         perfStack,
         [self section:@"Experimental (next launch)"],
         [self row:@"Effects (glow, depth of field, motion blur) at the 3D resolution" control:self.effects],
+        [self section:@"Reflection test (temporary)"],
+        [self note:@"For the car flicker at 90/120 fps. Live, and off again at every launch."],
+        diagStack,
         hint,
     ];
     self.home = [[UIStackView alloc] initWithArrangedSubviews:views];
@@ -1288,6 +1314,15 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 
 - (void)perfChanged:(UISwitch *)sw {
     set_mod_setting(kPerfSwitches[sw.tag].key, sw.on ? 1 : 0);
+}
+
+// The reflection test (temporary, for the car flicker at 90/120 fps): live, and off again at every launch.
+- (void)diagChanged:(UISwitch *)sender {
+    unsigned mask = 0;
+    for (UISwitch *sw in self.diag)
+        if (sw.on)
+            mask |= (unsigned)sw.tag;
+    host_d9_diag_set(mask);
 }
 // The switches show the settings as they are (the Graphics tab or F10 may have changed them); not while one is
 // being changed, which the poll's next read shows anyway.
