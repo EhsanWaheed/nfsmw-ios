@@ -673,8 +673,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         {1, @"Freeze car reflections", @"The reflection picture on every car stops updating."},
         {2, @"Freeze shadow map", @"The sun's shadows stop updating."},
         {4, @"Log reflection passes", @"Writes the next 600 frames to the log for me to read."},
-        {8, @"Capture 12 frames", @"While it flickers: saves the next 12 frames (pictures and draw lists) to the "
-                                  @"Logs folder. Off and on again captures 12 more."},
+        {8, @"Capture 12 frames", @"Starts 5 seconds after you turn it on: close the panel and drive while it "
+                                  @"flickers. Saves 12 frames (pictures and draw lists) to the Logs folder. Off and "
+                                  @"on again captures 12 more."},
     };
     for (const auto &item : diagItems) {
         UISwitch *sw = [UISwitch new];

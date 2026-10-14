@@ -7290,8 +7290,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     m & 2 ? "HELD" : "live", m & 4 ? "on (600 frames)" : "off");
             if ((m & 4) && !(diag_prev_ & 4))
                 diag_log_left_ = 600;
-            if ((m & 8) && !(diag_prev_ & 8) && !diag_cap_list_)
-                diag_cap_pending_ = true;
+            if ((m & 8) && !(diag_prev_ & 8) && !diag_cap_list_) {
+                diag_cap_pending_ = true;   // 5 s from now: time to close the panel (it pauses the race) and drive
+                diag_cap_at_ns_ = os_monotonic_ns() + 5000000000ull;
+            }
             diag_prev_ = m;
         }
         const uint64_t now = os_monotonic_ns();
@@ -7316,7 +7318,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     FILE *diag_cap_list_ = nullptr;
     uint32_t diag_cap_n_ = 0, diag_cap_draw_ = 0;
     std::string diag_cap_dir_;
-    uint64_t diag_cap_last_ns_ = 0;
+    uint64_t diag_cap_last_ns_ = 0, diag_cap_at_ns_ = 0;
     static uint32_t diag_hash(const float *f, uint32_t count) {
         uint32_t h = 2166136261u;
         const uint8_t *b = reinterpret_cast<const uint8_t *>(f);
@@ -7339,7 +7341,9 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         diag_cap_draw_ = 0;
     }
     void diag_capture(Tex &t, uint32_t w, uint32_t h) {
-        if (diag_cap_pending_) {   // starts with the next frame (this one was drawn before the switch)
+        if (diag_cap_pending_) {   // starts with the next frame (this one was drawn before the start)
+            if (os_monotonic_ns() < diag_cap_at_ns_)
+                return;
             diag_cap_pending_ = false;
             NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
             const time_t now = time(nullptr);
