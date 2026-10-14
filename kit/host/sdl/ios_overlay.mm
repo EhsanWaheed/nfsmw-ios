@@ -704,8 +704,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         self.output,
         self.outputNote,
         [self label:@"3D resolution: MetalFX upscales the 3D scene to the output; the HUD and menus stay at the "
-                    @"output resolution. Native draws the scene at the output resolution, without MetalFX, and so "
-                    @"does a step above 3/4 of the output (upscaling that little leaves fine lines)."
+                    @"output resolution. Native draws the scene at the output resolution, without MetalFX. A step "
+                    @"above 5/6 of the output draws at 5/6 (upscaling that little leaves fine lines)."
               style:UIFontTextStyleSubheadline],
         self.resolution,
         [self row:@"Frame cap (fps)" control:self.frameCap],
@@ -746,14 +746,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     host_upscale_last_sizes(&iw, &ih, &ow, &oh);
     static const char *const thermal[] = {"nominal", "fair", "serious", "critical"};
     const NSInteger t = std::clamp<NSInteger>(NSProcessInfo.processInfo.thermalState, 0, 3);
-    // d3d9_metal.mm upscale_begin: a 3D height above 3/4 of the output draws at the output (no MetalFX line grid).
-    const BOOL close = _appliedRows > 0 && _appliedRows * 4 > _nativeRows * 3;
     NSString *scene = iw ? [NSString stringWithFormat:@"3D scene %d×%d → %d×%d (MetalFX)", iw, ih, ow, oh]
                          : _appliedRows == 0 ? @"3D scene at native resolution (MetalFX off)"
-                         : close ? [NSString stringWithFormat:@"3D scene at the output resolution: %dp is too close to "
-                                                              @"%dp to upscale cleanly",
-                                                              _appliedRows, _nativeRows]
-                                 : @"3D scene: not upscaled yet (in the front end it draws native)";
+                                             : @"3D scene: not upscaled yet (starts with the next 3D frame)";
     NSString *stepped = _appliedRows != [self userRows]
                             ? [NSString stringWithFormat:@" · stepped down to %dp", _appliedRows]
                             : @"";
