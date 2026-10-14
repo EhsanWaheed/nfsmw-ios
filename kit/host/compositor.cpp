@@ -8,6 +8,10 @@
 #include "gpu/upscale_control.h"
 #endif
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -202,7 +206,11 @@ void draw(Pass &pass, const CompositorInput &in, gpu::Texture tex, CompositeRect
            {float(uv.x), float(uv.y), float(uv.w), float(uv.h)},
            {float(in.drawable_w), float(in.drawable_h)},
            uint32_t(blend == Opaque),
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+           1}; // the capped output is stretched to the screen: filter a fractional stretch (compositor_sample)
+#else
            0};
+#endif
     pass.device->set_pipeline(pass.cb, p);
     pass.device->set_bytes(pass.cb, gpu::Stage::Vertex, 0, &q, sizeof q);
     pass.device->set_bytes(pass.cb, gpu::Stage::Fragment, 0, &q, sizeof q);

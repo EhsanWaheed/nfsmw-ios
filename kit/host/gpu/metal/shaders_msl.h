@@ -19,11 +19,22 @@ vertex Varying compositor_vertex(uint id [[vertex_id]], constant Quad& q [[buffe
     v.uv=q.uv.xy+corners[id]*q.uv.zw;
     return v;
 }
+// q.pad 1 (iOS, compositor.cpp): a source stretched by a fraction (1280x960 onto a 2752x2064 iPad) is filtered;
+// nearest would make some source pixels two screen pixels wide and some three, a fixed grid of lines. A whole
+// multiple (and every 1:1 element) stays nearest, as everywhere else.
+float4 compositor_sample(texture2d<float> tex, constant Quad& q, float2 uv) {
+    constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
+    constexpr sampler smooth(coord::normalized,address::clamp_to_edge,filter::linear);
+    if(q.pad) {
+        const float2 k=q.rect.zw/max(float2(tex.get_width(),tex.get_height())*q.uv.zw,1.0);
+        if(any(abs(k-round(k))>0.01)) return tex.sample(smooth,uv);
+    }
+    return tex.sample(nearest,uv);
+}
 fragment float4 compositor_fragment(Varying v [[stage_in]],
                                     constant Quad& q [[buffer(0)]],
                                     texture2d<float> tex [[texture(0)]]) {
-    constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
-    float4 c=tex.sample(nearest,v.uv);
+    float4 c=compositor_sample(tex,q,v.uv);
     if(q.opaque) c.a=1;
     return c;
 }
@@ -52,8 +63,7 @@ fragment float4 compositor_hdr_fragment(Varying v [[stage_in]],
                                         constant Quad& q [[buffer(0)]],
                                         constant Hdr& h [[buffer(1)]],
                                         texture2d<float> tex [[texture(0)]]) {
-    constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
-    float4 c=tex.sample(nearest,v.uv);
+    float4 c=compositor_sample(tex,q,v.uv);
     const float mask=c.a;
     if(q.opaque) c.a=1;
     if(h.mode>4.5 && v.uv.y<0.1) {   // R2 #10 TEST bars: 1, 2, 4, 8 x SDR white through the mode-3 shoulder
