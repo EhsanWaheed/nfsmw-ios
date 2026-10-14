@@ -98,14 +98,17 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
     in `kit/host/sdl/main.cpp` `note_screen_size`) and the core mod's Auto resolution uses it.
   - *3D resolution* (540p, 600p, 720p ... Native; instant): the MetalFX scene height (`host_upscale_set_rows`,
     `kit/host/gpu/metal/d3d9_metal.mm`). Native = the output size, no MetalFX. First-run default: the largest step
-    at most 85% of the output (600p at 720p).
+    at most 85% of the output (600p at 720p). A step above 3/4 of the output draws native too (v2.3,
+    `upscale_begin`): the spatial scaler at a ratio near 1 (800p onto 900p, 9/8) left a grid of fine lines every
+    1/(ratio-1) scene pixels, sharp where scene and output pixels line up and soft between.
   - *Frame cap* 30/60/90/120 with a ProMotion rate hint.
   - *Dynamic resolution*: one 3D step down at thermal fair, two at serious, 540p at critical; back up as it cools.
   - (*Stretch to fill* was removed in v2: the output has the screen's own shape, so it had nothing to do; a saved
     value is cleared and `host_compositor_set_stretch(0)` applied.)
   - *Performance*: switches for the Definitive look's heaviest extras, which the Detail presets do not touch
     (`quality_presets.h` sets only the game's own video values): ambient occlusion, motion blur, background blur,
-    mirror scenery (live), softer shadows and the HD mirror (next launch).
+    mirror scenery (live), softer shadows, the HD mirror and Always rain (next launch). Always rain turns the
+    weather cycle off for the session (`eo_extra.h`): the cycle's dry phases stopped the game's forced rain.
   - *Effects at internal resolution* (on by default; next launch): glow / DoF / blur before the upscale.
   - *Max performance (experimental)* (v2.1; next launch, with a Liquid Glass restart card): for hotter or older
     phones, aiming at 60 fps. `kMaxPerfRecipe`: Detail Low and every heavy extra off, the player's values saved in
@@ -118,7 +121,13 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
   taking the keyboard; the panel reads `mods_menu_snapshot` and acts with `mods_menu_pointer_line`. Apply/Discard
   sit in the footer. Controls adds the connected controller and "Assign" for the shift buttons (press a button;
   kit order square, cross, circle, triangle, l1, r1, l2, r2, select, start, l3, r3, ps).
+- **Diagnostics** (v2.3; live, off at every launch): the reflection test, `host_d9_diag_set` in `d3d9_metal.mm`:
+  hold the car reflection maps (cube-face draws and clears skipped), hold the shadow map (square depth textures the
+  scene samples), log those passes for 600 frames, and capture 12 consecutive frames (`frame_NN.ppm` + a draw list
+  `frame_NN.txt` each) into `Documents/Logs/capture-<time>`, starting 5 s after the switch (the panel pauses the race).
 - First run on a fresh profile: Detail set to Low once (`seedFirstRun`).
+- The final stretch of the output to the screen (`compositor.cpp` + `shaders_msl.h` `compositor_sample`) is filtered
+  on iOS when the scale is fractional (nearest sampling everywhere else, as before).
 
 ### Controller button icons
 
@@ -166,6 +175,18 @@ capture of the main menu's M3 GTR; kept out of git), through `kit/tools/extract_
   show the build: `[ios] launch options: output 720 rows, ...`.
 - **A stale build**: LiveContainer once kept running an older binary after an IPA import; compare the binary's size
   and the launch-options line.
+
+- **Car shadows moving in races** (v2.3): the day cycle moved the sun a little every frame, so the shadows were
+  redrawn differently each frame. The time of day now moves in 1200 steps a day (`RECOMP_TOD_STEPS`, `eo_extra.h`).
+- **Car flicker in rain above 60 fps** (14 Oct, not fixed): only in rain and only with a cap above 60 (the
+  simulation stays at 60 Hz, so some frames fall between two updates). Ruled out on the iPad with the Diagnostics
+  switches and settings: the car reflection and shadow maps, car paint (Natural, Xbox 360, Off), wet roads,
+  ambient occlusion, motion blur. Left: the game's own rain drawing. A 60 fps cap avoids it (the player's choice).
+- **The weather in a log**: `core.nfsmw: Weather: <phase> (cycle x)`; a test of anything rain-related needs the rain
+  phase or Always rain.
+- **Builds from the Claude session after an Xcode update**: if `xcode-select` points at the Command Line Tools, its
+  older linker cannot read the new iOS SDK's `.tbd` files ("unknown architecture"); build with
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
 
 ## Open
 

@@ -154,6 +154,7 @@ const PerfSwitch kPerfSwitches[] = {
     {"mirror_full_scenery", "Mirror: all scenery (the mirror draws the world again)", false},
     {"soft_shadows", "Softer shadows", true},
     {"mirror_hd", "Mirror: sharp HD picture", true},
+    {"always_rain", "Always rain", true},
 };
 
 // A DualSense, drawn (UIKit has no picture of one): white body and grips, black centre, the touchpad with its blue
@@ -229,7 +230,7 @@ const PerfValue kMaxPerfRecipe[] = {
 };
 
 // The panel's tabs; the last three are the game's settings pages.
-enum Tab { TAB_HOME, TAB_GRAPHICS, TAB_MODS, TAB_CONTROLS };
+enum Tab { TAB_HOME, TAB_GRAPHICS, TAB_MODS, TAB_CONTROLS, TAB_DIAG }; // DIAG: ours, no F10 page behind it
 int menu_tab(NSInteger t) {
     return t == TAB_GRAPHICS ? MENU_TAB_GRAPHICS : t == TAB_MODS ? MENU_TAB_MODS : MENU_TAB_CONTROLS;
 }
@@ -265,6 +266,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) NSArray<UISwitch *> *perf; // kPerfSwitches, by index (tag)
 @property(nonatomic) UISwitch *maxPerf;
 @property(nonatomic) NSArray<UISwitch *> *diag; // the reflection test: tag = its host_d9_diag_set bit, never saved
+@property(nonatomic) UIStackView *diagView;      // the Diagnostics tab
 @property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
@@ -532,7 +534,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [root addSubview:panel];
 
     // Header: the tabs and Done.
-    self.tabs = [[UISegmentedControl alloc] initWithItems:@[ @"Home", @"Graphics", @"Mods", @"Controls" ]];
+    self.tabs = [[UISegmentedControl alloc] initWithItems:@[ @"Home", @"Graphics", @"Mods", @"Controls", @"Diagnostics" ]];
     self.tabs.selectedSegmentIndex = TAB_HOME;
     [self.tabs addTarget:self action:@selector(tabChanged:) forControlEvents:UIControlEventValueChanged];
     UIButton *done = [self button:@"Done" action:@selector(close) tag:0 prominent:YES];
@@ -557,7 +559,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.menu.spacing = 12;
     self.menu.hidden = YES;
 
-    UIStackView *body = [[UIStackView alloc] initWithArrangedSubviews:@[ self.home, self.menu ]];
+    UIStackView *body = [[UIStackView alloc] initWithArrangedSubviews:@[ self.home, self.diagView, self.menu ]];
     body.axis = UILayoutConstraintAxisVertical;
     body.translatesAutoresizingMaskIntoConstraints = NO;
     self.scroll = [UIScrollView new];
@@ -702,7 +704,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         self.output,
         self.outputNote,
         [self label:@"3D resolution: MetalFX upscales the 3D scene to the output; the HUD and menus stay at the "
-                    @"output resolution. Native draws the scene at the output resolution, without MetalFX."
+                    @"output resolution. Native draws the scene at the output resolution, without MetalFX, and so "
+                    @"does a step above 3/4 of the output (upscaling that little leaves fine lines)."
               style:UIFontTextStyleSubheadline],
         self.resolution,
         [self row:@"Frame cap (fps)" control:self.frameCap],
@@ -717,11 +720,17 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         perfStack,
         [self section:@"Experimental (next launch)"],
         [self row:@"Effects (glow, depth of field, motion blur) at the 3D resolution" control:self.effects],
-        [self section:@"Reflection test (temporary)"],
-        [self note:@"For the car flicker at 90/120 fps. Live, and off again at every launch."],
-        diagStack,
         hint,
     ];
+    self.diagView = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self section:@"Reflection test"],
+        [self note:@"For the car flicker in rain above 60 fps (a 60 fps cap avoids it). Live, and off again at "
+                   @"every launch."],
+        diagStack,
+    ]];
+    self.diagView.axis = UILayoutConstraintAxisVertical;
+    self.diagView.spacing = 12;
+    self.diagView.hidden = YES;
     self.home = [[UIStackView alloc] initWithArrangedSubviews:views];
     self.home.axis = UILayoutConstraintAxisVertical;
     self.home.spacing = 12;
@@ -737,9 +746,14 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     host_upscale_last_sizes(&iw, &ih, &ow, &oh);
     static const char *const thermal[] = {"nominal", "fair", "serious", "critical"};
     const NSInteger t = std::clamp<NSInteger>(NSProcessInfo.processInfo.thermalState, 0, 3);
+    // d3d9_metal.mm upscale_begin: a 3D height above 3/4 of the output draws at the output (no MetalFX line grid).
+    const BOOL close = _appliedRows > 0 && _appliedRows * 4 > _nativeRows * 3;
     NSString *scene = iw ? [NSString stringWithFormat:@"3D scene %d×%d → %d×%d (MetalFX)", iw, ih, ow, oh]
-                         : (_appliedRows == 0 ? @"3D scene at native resolution (MetalFX off)"
-                                              : @"3D scene: not upscaled yet (in the front end it draws native)");
+                         : _appliedRows == 0 ? @"3D scene at native resolution (MetalFX off)"
+                         : close ? [NSString stringWithFormat:@"3D scene at the output resolution: %dp is too close to "
+                                                              @"%dp to upscale cleanly",
+                                                              _appliedRows, _nativeRows]
+                                 : @"3D scene: not upscaled yet (in the front end it draws native)";
     NSString *stepped = _appliedRows != [self userRows]
                             ? [NSString stringWithFormat:@" · stepped down to %dp", _appliedRows]
                             : @"";
@@ -751,14 +765,17 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (void)showTab:(NSInteger)tab {
     _tab = tab;
     _captureKey.clear();
-    const BOOL home = tab == TAB_HOME;
+    const BOOL home = tab == TAB_HOME, diag = tab == TAB_DIAG;
     self.home.hidden = !home;
-    self.menu.hidden = home;
-    self.footer.hidden = home;
+    self.diagView.hidden = !diag;
+    self.menu.hidden = home || diag;
+    self.footer.hidden = home || diag;
     if (home) {
         mods_menu_close_headless();
         [self refreshPerf];
         [self refreshStatus];
+    } else if (diag) {
+        mods_menu_close_headless();
     } else {
         _menuGeneration = 0;
         [self rebuildMenu];
@@ -1448,7 +1465,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         }
         if (_tab == TAB_HOME) {
             [self refreshStatus];
-        } else if (_captureKey.empty()) {
+        } else if (_tab != TAB_DIAG && _captureKey.empty()) {
             MenuSnapshot s;
             if (!mods_menu_open_headless(menu_tab(_tab)) || !mods_menu_snapshot(&s) || s.generation != _menuGeneration)
                 [self rebuildKeepingScroll];

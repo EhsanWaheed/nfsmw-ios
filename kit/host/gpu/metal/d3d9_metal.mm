@@ -5200,9 +5200,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         float s = bt->scale / upscale_factor_;
         // A host's scene height (upscale_control.h) replaces the launch factor: the backing is that many physical
         // rows, at most 4x below the back buffer; at or above the back buffer's own height the scene draws native.
+        // Above 3/4 of it the scene draws native too: the spatial scaler at a ratio that close to 1 (800 rows onto
+        // 900: 9/8) is sharp where output and scene pixels line up and soft between, a grid of lines every
+        // 1/(ratio-1) scene pixels (8 there) on the whole picture. 3/4 (540 onto 720, period 3) and below stay upscaled.
         if (const int rows = g_upscale_rows.load(std::memory_order_relaxed); rows >= 0) {
             const float native_rows = bt->desc.height * bt->scale;
-            if (rows == 0 || rows >= native_rows - 0.5f) {
+            if (rows == 0 || rows * 4.0f > native_rows * 3.0f + 0.5f) {
                 ++up_.native;
                 g_upscale_in.store(0);
                 g_upscale_out.store(0);

@@ -450,7 +450,11 @@ static void eo_extra_init3b(const PopModApi *api) {
     if (g_tod_day_s < 600.0) g_tod_day_s = 600.0;
     { const char *e = getenv("NFSMW_TOD_SPEED"); if (e && *e && atof(e) > 0) g_tod_speed = atof(e); }
     if (g_tod_cycle && install(0x00769360u, eo_tod_after, POP_HOOK_AFTER, 139) != POP_OK) ++failed;
-    g_weather_cycle = setting("weather", 1) == 1;
+    /* Always rain wins over the weather cycle: the cycle's clear and drying phases write a dry rain override every
+     * world frame, which stopped the game's forced rain (owner test 14 Oct: "always rain" races with no rain). */
+    g_weather_cycle = setting("weather", 1) == 1 && setting("always_rain", 0) == 0;
+    if (setting("weather", 1) == 1 && !g_weather_cycle)
+        api->log(api, "core.nfsmw: Weather cycle: off this session (Always rain is on)");
     g_weather_cycle_s = 60.0 * (double)setting("weather_cycle_minutes", 20);
     if (g_weather_cycle_s < 600.0) g_weather_cycle_s = 600.0;
     /* Run 16 (owner 9 Oct, "random start + shorter"): each session starts at a random point of the cycle, so rain can
