@@ -2665,6 +2665,8 @@ class Renderer final : public D9Backend {
         ++stat_calls_;
         if (test_skip_label_ && d.label && !strncmp(d.label, test_skip_label_, strlen(test_skip_label_)))
             return;   // run 16 TEST ONLY (RECOMP_TEST_SKIP_LABEL=<label prefix>): which draws are which on screen
+        if (diag_cap_list_)
+            diag_record(d);   // the iOS reflection test's frame capture: every draw, held or not
         if (g_d9_diag.load(std::memory_order_relaxed) && diag_hold(d.target, false))
             return;   // the iOS reflection test (g_d9_diag)
         if (softfx_on_ && !soft_done_ && d.label && !strncmp(d.label, "IDI_PARTICLES_FX/", 17) && enc_ &&
@@ -4497,6 +4499,8 @@ class Renderer final : public D9Backend {
         }
         if (probing())
             probe_dump();
+        if (diag_cap_pending_ || diag_cap_list_)
+            diag_capture(t, w, h);   // the iOS reflection test's frame capture (g_d9_diag 8)
         uint32_t every = host_dump_every();
         if (every && ((presents_ + 1) % every) == 0) {
             dump(t, w, h);
@@ -7286,6 +7290,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     m & 2 ? "HELD" : "live", m & 4 ? "on (600 frames)" : "off");
             if ((m & 4) && !(diag_prev_ & 4))
                 diag_log_left_ = 600;
+            if ((m & 8) && !(diag_prev_ & 8) && !diag_cap_list_)
+                diag_cap_pending_ = true;
             diag_prev_ = m;
         }
         const uint64_t now = os_monotonic_ns();
@@ -7301,6 +7307,76 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         diag_last_ns_ = now;
         diag_cube_draws_ = diag_cube_clears_ = diag_cube_faces_ = diag_shadow_draws_ = diag_shadow_clears_ =
             diag_held_ = 0;
+    }
+    // Frame capture (bit 8): the next kDiagCapFrames presented frames, each as a picture (frame_NN.ppm) and a list
+    // of its draws (frame_NN.txt), into Documents/Logs/capture-<time>. Consecutive frames, so a frame drawn between
+    // two simulation steps can be compared with its neighbours.
+    static constexpr uint32_t kDiagCapFrames = 12;
+    bool diag_cap_pending_ = false;
+    FILE *diag_cap_list_ = nullptr;
+    uint32_t diag_cap_n_ = 0, diag_cap_draw_ = 0;
+    std::string diag_cap_dir_;
+    uint64_t diag_cap_last_ns_ = 0;
+    static uint32_t diag_hash(const float *f, uint32_t count) {
+        uint32_t h = 2166136261u;
+        const uint8_t *b = reinterpret_cast<const uint8_t *>(f);
+        for (size_t i = 0, n = f ? (size_t)count * 16 : 0; i < n; ++i)
+            h = (h ^ b[i]) * 16777619u;
+        return h;
+    }
+    void diag_record(const HostD9Draw &d) {
+        fprintf(diag_cap_list_, "%u %s vs %016llx ps %016llx c0 %u:%u z %u tex %u %u %u %u %u %u prims %u vc %08x pc %08x\n",
+                diag_cap_draw_++, d.label ? d.label : "-", (unsigned long long)d.vs_key, (unsigned long long)d.ps_key,
+                d.target.color[0].id, d.target.color[0].face, d.target.depth.id, d.sampler_texture[0],
+                d.sampler_texture[1], d.sampler_texture[2], d.sampler_texture[3], d.sampler_texture[4],
+                d.sampler_texture[5], d.primitive_count, diag_hash(d.vconst, d.vconst_count),
+                diag_hash(d.pconst, d.pconst_count));
+    }
+    void diag_open_list() {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/frame_%02u.txt", diag_cap_dir_.c_str(), diag_cap_n_);
+        diag_cap_list_ = fopen(path, "w");
+        diag_cap_draw_ = 0;
+    }
+    void diag_capture(Tex &t, uint32_t w, uint32_t h) {
+        if (diag_cap_pending_) {   // starts with the next frame (this one was drawn before the switch)
+            diag_cap_pending_ = false;
+            NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            const time_t now = time(nullptr);
+            char stamp[32];
+            strftime(stamp, sizeof stamp, "%H%M%S", localtime(&now));
+            diag_cap_dir_ = std::string(docs.UTF8String) + "/Logs/capture-" + stamp;
+            os_mkdir(diag_cap_dir_.c_str());
+            diag_cap_n_ = 0;
+            diag_cap_last_ns_ = os_monotonic_ns();
+            diag_open_list();
+            fprintf(stderr, "[ios] reflection test: capturing %u frames into %s%s\n", kDiagCapFrames,
+                    diag_cap_dir_.c_str(), diag_cap_list_ ? "" : " (FAILED: no list file)");
+            return;
+        }
+        const uint64_t now = os_monotonic_ns();
+        fprintf(diag_cap_list_, "# present %llu, %ux%u, +%.2f ms since the last frame\n", (unsigned long long)(presents_ + 1),
+                w, h, (now - diag_cap_last_ns_) / 1e6);
+        diag_cap_last_ns_ = now;
+        fclose(diag_cap_list_);
+        diag_cap_list_ = nullptr;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/frame_%02u.ppm", diag_cap_dir_.c_str(), diag_cap_n_);
+        if (t.info.pixel == MTLPixelFormatBGRA8Unorm) {
+            settle(t.used);
+            std::vector<uint8_t> bgra((size_t)w * h * 4), rgb((size_t)w * h * 3);
+            [t.texture getBytes:bgra.data() bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+            for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
+                rgb[i * 3] = bgra[i * 4 + 2];
+                rgb[i * 3 + 1] = bgra[i * 4 + 1];
+                rgb[i * 3 + 2] = bgra[i * 4];
+            }
+            host_write_ppm(path, rgb.data(), (int)w, (int)h);
+        }
+        if (++diag_cap_n_ < kDiagCapFrames)
+            diag_open_list();
+        else
+            fprintf(stderr, "[ios] reflection test: capture done (%u frames)\n", kDiagCapFrames);
     }
     // Remaster run 13 front-end floor shadows (RECOMP_REMASTER_FEFLOOR=1; A/B switch fefloor; fef_capture above).
     // TEST ONLY: RECOMP_REMASTER_FEFLOOR_DEBUG=1 (same lookup, colour unchanged: must match the floor without it),

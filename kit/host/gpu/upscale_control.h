@@ -25,7 +25,8 @@ void host_upscale_set_rows(int rows);
 void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h);
 
 // The iOS panel's reflection test (Metal renderer, live): 1 holds the car
-// reflection maps, 2 holds the shadow maps, 4 logs their passes for 600 frames.
+// reflection maps, 2 holds the shadow maps, 4 logs their passes for 600 frames,
+// 8 captures the next 12 frames (pictures and draw lists) into Documents/Logs.
 void host_d9_diag_set(unsigned mask);
 
 // The presenter's picture placement (host/compositor.cpp): 0 keeps the game's
