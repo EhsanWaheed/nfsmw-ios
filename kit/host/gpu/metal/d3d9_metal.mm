@@ -2969,7 +2969,9 @@ class Renderer final : public D9Backend {
         uint32_t cw[4] = {rs[168], rs[190], rs[191], rs[192]};
         // v2.5 MetalFX temporal: in a motion pass every unblended draw writes its motion (colour 1, RG); the rest
         // leave it (a blended draw shows what is behind it, whose motion is already there).
-        const bool want_motion = pass_motion_ && !blend;
+        // The car body and its windows draw blended (paint, glass) but write depth: they are surfaces, so they write
+        // their own motion too (unblended, pipeline()); a blend without depth writes (smoke, glow) leaves it.
+        const bool want_motion = pass_motion_ && (!blend || (rs[7] && rs[14]));
         if (pass_motion_)
             cw[1] = want_motion ? 3u : 0u;
         uint64_t bkey =
@@ -6056,7 +6058,9 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             for (uint32_t i = 0; i < RESET_COUNT; ++i)
                 fnd_.reset_why[i] += (reset >> i) & 1u;
         }
-        fnd_motion(bt, valid, vp, agree ? &P : nullptr);
+        // v2.5 MetalFX temporal: the camera vectors only from a VP_k the camera agrees with (a wrong pick is noise
+        // on every pixel without its own vector: the sky, particles)
+        fnd_motion(bt, valid && (!tmp_.frame || agree), vp, agree ? &P : nullptr);
         // the previous VP: only at the end of a valid frame (main view only)
         fnd_.prev_valid = valid;
         if (valid)
@@ -6986,7 +6990,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             if (cw[i] & 8)
                 m |= MTLColorWriteMaskAlpha;
             a.writeMask = m;
-            if (blend) {
+            if (blend && !(pass_motion_ && i == 1)) {   // v2.5: the motion target is never blended
                 a.blendingEnabled = YES;
                 a.sourceRGBBlendFactor = blend_factor(rs[19], false);
                 a.destinationRGBBlendFactor = blend_factor(rs[20], false);
@@ -7588,7 +7592,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         return t && *t == '1' && f && *f == '1' && j && *j == '1' && !(k && *k);
     }();
     // MetalFX's jitter is the sample offset: the geometry moved by (jx, jy) pixels samples at minus that. 1 flips it.
-    const float tmp_jsign_ = [] { const char *e = getenv("RECOMP_TEMPORAL_JITTER_SIGN"); return e && *e == '1' ? 1.0f : -1.0f; }();
+    // (owner test 16 Oct: the flipped sign, +1, was the steadier one; the scaler takes the shift as drawn)
+    const float tmp_jsign_ = [] { const char *e = getenv("RECOMP_TEMPORAL_JITTER_SIGN"); return e && *e == '0' ? -1.0f : 1.0f; }();
     struct TmpRows {
         std::vector<float> c;   // the draw's vertex constants (4 floats each)
     };
