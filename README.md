@@ -59,6 +59,12 @@ settings. For
 a cool, smooth iPhone: **Output 720p**, **3D 600p**, **Frame cap 60**. Details and how it was built:
 **[docs/IOS_PORT.md](docs/IOS_PORT.md)**.
 
+**v3:** Graphics → **Upscaler** can switch from MetalFX Spatial to **Temporal (experimental)**: the 3D scene is built
+up over several frames from each object's own motion, for smoother edges and finer detail (restart to apply). Also
+new: the game pauses when the settings open in a race, locking the phone no longer freezes it (sound comes back
+too), an **80 fps** cap that holds (ProMotion's 120/80/60/40/30 steps), 40 fps in menus and 30 while paused to keep
+the phone cool, and the Stuff Pack smoke crash at the race countdown is fixed.
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.

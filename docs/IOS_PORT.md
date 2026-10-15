@@ -98,10 +98,14 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
     in `kit/host/sdl/main.cpp` `note_screen_size`) and the core mod's Auto resolution uses it.
   - *3D resolution* (540p, 600p, 720p ... Native; instant): the MetalFX scene height (`host_upscale_set_rows`,
     `kit/host/gpu/metal/d3d9_metal.mm`). Native = the output size, no MetalFX. First-run default: the largest step
-    at most 85% of the output (600p at 720p). A step above 3/4 of the output draws native too (v2.3,
-    `upscale_begin`): the spatial scaler at a ratio near 1 (800p onto 900p, 9/8) left a grid of fine lines every
+    at most 85% of the output (600p at 720p). A step above 5/6 of the output draws at 5/6 (v3, `upscale_begin`;
+    v2.3 drew it native): the spatial scaler at a ratio near 1 (800p onto 900p, 9/8) left a grid of fine lines every
     1/(ratio-1) scene pixels, sharp where scene and output pixels line up and soft between.
-  - *Frame cap* 30/60/90/120 with a ProMotion rate hint.
+  - *Upscaler* (v3; next launch, with the restart card): Spatial or **Temporal (experimental)**, below.
+  - *Frame cap* 30/60/80/120 (v3: 80, not 90 — ProMotion runs at 120/80/60/40/30) with a ProMotion rate hint. The
+    game's own limiter (`kit/runtime/frame_deadline.h`) paces any cap from 20 to 240 (it took only 40/60/120, so 80
+    and 30 ran on the display's pacing alone and went over). 40 fps in the front end's menus and 30 while paused or
+    with the panel open (`applyFrameCap`, game phase from private render state 248, `host_d9_game_phase`).
   - *Dynamic resolution*: one 3D step down at thermal fair, two at serious, 540p at critical; back up as it cools.
   - (*Stretch to fill* was removed in v2: the output has the screen's own shape, so it had nothing to do; a saved
     value is cleared and `host_compositor_set_stretch(0)` applied.)
@@ -125,6 +129,25 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
   hold the car reflection maps (cube-face draws and clears skipped), hold the shadow map (square depth textures the
   scene samples), log those passes for 600 frames, and capture 12 consecutive frames (`frame_NN.ppm` + a draw list
   `frame_NN.txt` each) into `Documents/Logs/capture-<time>`, starting 5 s after the switch (the panel pauses the race).
+- **MetalFX temporal** (v3, experimental; `RECOMP_REMASTER_UPSCALE_TEMPORAL=1` + the foundation and its jitter, set at
+  launch by the panel). Per-draw motion vectors, the technique of the Xbox 360 port bep1s69/nfsmw-ios (written anew
+  here): every depth-tested scene draw gets an identity (vertex program, stream 0 buffer/offset, index buffer, range,
+  and how many draws of the same came before it this scene); its vertex constants are kept, and the next scene's
+  matching draw gets them back (`tmp_bind`, vertex buffers 20/21). The motion variants (`d3d9_shadergen.cpp`
+  `motion_vs_patch` / `motion_ps_patch`) run the vertex program's whole body a second time on those previous
+  constants (any position maths: the car's world x view-projection, skinning) and write previous minus current
+  position to colour 1 (RG16F, `tmp_.om`), unblended, also for blended draws that write depth (car paint, glass).
+  Pixels without a vector (sky, particles, new objects) get the foundation's camera reprojection from the depth, only
+  when its view-projection pick agrees with the game camera. Halton(2,3) jitter on the depth-tested draws only: the
+  PC game's full-screen 2D passes inside the scene (our clean chain: AO apply, motion blur / DoF, glow, finish; the
+  front end's world layer) copy the picture and draw it back, and jittering them again shook the picture by several
+  pixels. `MTLFXTemporalScaler` gets the scene, its depth, the vectors, the jitter as drawn (+, y down) and a reset
+  only on real breaks (cut, camera jump, FOV, a gap, a resize); the composed native depth is read unjittered for the
+  effects after the scene. Anything missing on a frame: that frame is scaled spatially. Diagnostics: *Show motion
+  vectors* (hue = direction) and *Flip temporal jitter*. Log: `[remaster] temporal:` every 600 frames.
+- **Background and the panel** (v3): in the background the game is held at its next Present (`host_d9_suspended`,
+  no GPU work where iOS refuses it) and the audio output is reopened on return (a screen lock stopped it); opening the
+  panel in a race presses the game's own pause (Escape).
 - First run on a fresh profile: Detail set to Low once (`seedFirstRun`).
 - The final stretch of the output to the screen (`compositor.cpp` + `shaders_msl.h` `compositor_sample`) is filtered
   on iOS when the scale is fractional (nearest sampling everywhere else, as before).
