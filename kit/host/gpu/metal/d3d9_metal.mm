@@ -79,7 +79,7 @@ std::atomic<int> g_upscale_rows{-1};
 std::atomic<uint64_t> g_upscale_in{0}, g_upscale_out{0};
 // v2.5 MetalFX temporal (host_upscale_temporal_*, upscale_control.h): the panel's jitter-sign test switch, and whether
 // the last scene was scaled temporally (1) or fell back to spatial (0); -1 before a scene. Any thread.
-std::atomic<int> g_temporal_flip{0}, g_temporal_active{-1};
+std::atomic<int> g_temporal_flip{0}, g_temporal_active{-1}, g_temporal_debug{0};
 // host_d9_diag_set (upscale_control.h): the iOS panel's reflection test, live, for the flicker at 90/120 fps.
 // 1 holds the car reflection maps (draws and clears into cube faces are skipped, the last contents stay), 2 holds
 // the shadow maps (square depth textures the scene samples), 4 logs those passes, one line a frame for 600 frames.
@@ -6122,14 +6122,16 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         fnd_.motion_tex = fnd_texture(fnd_.motion_tex, MTLPixelFormatRG16Float, w, h);
         // TEST measurement (the per-frame counters and the previous depth): _LOG or debug 8 only (CONF14B: +0.61 ms
         // with them always on at 3840x2160 4x MSAA)
-        const bool measure = fnd_log_ > 0 || fnd_debug_ == 8;
+        // v2.5: the panel's live "Show motion vectors" (g_temporal_debug) is debug view 6
+        const int dmode = fnd_debug_ ? fnd_debug_ : g_temporal_debug.load(std::memory_order_relaxed) ? 6 : 0;
+        const bool measure = fnd_log_ > 0 || dmode == 8;
         for (int i = 0; i < 2 && measure; ++i) {
             id<MTLTexture> o = fnd_.prevz[i];
             fnd_.prevz[i] = fnd_texture(o, MTLPixelFormatR32Float, w, h);
             if (fnd_.prevz[i] != o)
                 fnd_.prevz_valid = false;
         }
-        const bool dbg = fnd_debug_ == 6 || fnd_debug_ == 8;
+        const bool dbg = dmode == 6 || dmode == 8;
         if (dbg)
             fnd_.dbg = fnd_texture(fnd_.dbg, MTLPixelFormatRGBA16Float, w, h);
         if (!fnd_.motion_tex || (measure && (!fnd_.prevz[0] || !fnd_.prevz[1])) || (dbg && !fnd_.dbg)) {
@@ -6157,7 +6159,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                      pf = P && P->m[2][2] > 0.0 && P->m[2][2] < 1.0 ? P->m[3][2] / (1.0 - P->m[2][2]) : 0.0;
         u.zn = pn > 0.0 ? (float)pn : fnd_.cam.have && fnd_.cam.near > 0.0 ? (float)fnd_.cam.near : 0.5f;
         u.zf = pf > u.zn ? (float)pf : fnd_.cam.have && fnd_.cam.far > u.zn ? (float)fnd_.cam.far : 15000.0f;
-        u.flags = (measure && fnd_.prevz_valid ? 1u : 0u) | (fnd_debug_ == 6 ? 2u : 0u) | (fnd_debug_ == 8 ? 4u : 0u) |
+        u.flags = (measure && fnd_.prevz_valid ? 1u : 0u) | (dmode == 6 ? 2u : 0u) | (dmode == 8 ? 4u : 0u) |
                   (measure ? 8u : 0u) | 16u;   // 16: MSAA depth sample 0 (COMB14B cost: 0.19 vs 0.30 ms at 4K 4x)
         const bool om = tmp_.frame && tmp_.wrote && tmp_.om && tmp_.om.width == w && tmp_.om.height == h;
         if (om)
@@ -7967,6 +7969,9 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
 
 extern "C" void host_upscale_temporal_flip_jitter(int flip) {
     g_temporal_flip.store(flip ? 1 : 0, std::memory_order_relaxed);
+}
+extern "C" void host_upscale_temporal_show_motion(int on) {
+    g_temporal_debug.store(on ? 1 : 0, std::memory_order_relaxed);
 }
 extern "C" int host_upscale_temporal_active(void) {
     return g_temporal_active.load(std::memory_order_relaxed);

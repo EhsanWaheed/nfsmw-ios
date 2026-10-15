@@ -773,6 +773,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                     detail:[self note:@"With the Temporal upscaler: if still edges (poles, signs, the HUD-free road) "
                                       @"shimmer or wobble, try this. Live; tell me which looked steadier."]
                    control:[self switchWithAction:@selector(temporalFlipChanged:)]],
+        [self rowWithTitle:[self label:@"Show motion vectors" style:UIFontTextStyleBody]
+                    detail:[self note:@"With the Temporal upscaler: the 3D scene is replaced by its motion (colour = "
+                                      @"direction, brightness = speed; black = still). Drive a little, take a "
+                                      @"screenshot, turn it off. Live."]
+                   control:[self switchWithAction:@selector(temporalMotionChanged:)]],
         [self section:@"Reflection test"],
         [self note:@"For the car flicker in rain above 60 fps (a 60 fps cap avoids it). Live, and off again at "
                    @"every launch."],
@@ -1281,6 +1286,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     fprintf(stderr, "[ios] overlay: upscaler %s (restart to apply)\n", temporal ? "temporal" : "spatial");
     [self showRestartNoticeTitle:temporal ? @"Temporal upscaler is on" : @"Spatial upscaler is on"
                             icon:temporal ? @"sparkles" : @"arrow.counterclockwise.circle.fill"];
+}
+- (void)temporalMotionChanged:(UISwitch *)s {
+    host_upscale_temporal_show_motion(s.on ? 1 : 0);
 }
 - (void)temporalFlipChanged:(UISwitch *)s {
     host_upscale_temporal_flip_jitter(s.on ? 1 : 0);

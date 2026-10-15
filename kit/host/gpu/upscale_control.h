@@ -29,6 +29,8 @@ void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h);
 int host_upscale_temporal_active(void);
 // The panel's test switch: 1 flips the jitter sign MetalFX is given (a wrong sign shimmers on still edges).
 void host_upscale_temporal_flip_jitter(int flip);
+// The panel's test view: 1 draws the motion vectors over the 3D scene (hue = direction, brightness = length).
+void host_upscale_temporal_show_motion(int on);
 
 // The iOS panel's reflection test (Metal renderer, live): 1 holds the car
 // reflection maps, 2 holds the shadow maps, 4 logs their passes for 600 frames,
