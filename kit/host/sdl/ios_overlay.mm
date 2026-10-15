@@ -2,6 +2,8 @@
 #include "ios_overlay.h"
 
 #include "../gpu/upscale_control.h"
+#include "../../dx/host_d9.h" // host_d9_game_phase
+extern "C" void host_ios_panel_focus(bool open); // main.cpp: the panel takes the game's focus while open
 #include "../../mods/mods_internal.h"
 #include "../../mods/settings_menu.h"
 #include "../../runtime/display_seam.h"
@@ -227,6 +229,7 @@ const PerfValue kMaxPerfRecipe[] = {
     {"pbr_facades", 0},    {"natural_water", 0},    {"natural_glass", 0},      {"clean_pools", 0},
     {"atmosphere", 0},     {"vehicle_lights", 0},    {"x360_textures", 0},     {"x360_sky", 0},
     {"remaster_a2c", 0},
+    {"force_car_lod", 0}, // the cars' most detailed models (a handful on screen; the owner: the car must look clean)
 };
 
 // The panel's tabs; the last three are the game's settings pages.
@@ -282,6 +285,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 
 @implementation RecompIosOverlay {
     std::vector<int> _rows; // the resolution choices, ascending; 0 (native) last
+    uint32_t _phaseApplied;   // applyFrameCap: the game phase and panel visibility the cap was set for
+    bool _visibleApplied;
     std::vector<int> _fps;  // the frame caps this display can show
     int _nativeRows; // the back buffer's height: the output resolution in effect
     int _screenRows;
@@ -403,6 +408,30 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     int cap = (int)[defaults() integerForKey:kFps];
     if (std::find(_fps.begin(), _fps.end(), cap) == _fps.end())
         cap = 60;
+    // Max performance holds the cap at 60 and locks the control; the player's own cap (kFps) comes back with it off.
+    const BOOL locked = [defaults() boolForKey:kMaxPerf];
+    if (locked)
+        cap = 60;
+    if (self.frameCap) {
+        self.frameCap.enabled = !locked;
+        const auto at = std::find(_fps.begin(), _fps.end(), cap);
+        if (at != _fps.end())
+            self.frameCap.selectedSegmentIndex = (NSInteger)(at - _fps.begin());
+    }
+    // v2.4 (owner 15 Oct, heat): 30 fps while this panel is open or the race is paused (nothing moves), 40 in the
+    // front end's menus (the garage scene drew at the race cap and kept the phone hot between races; 40 is a
+    // ProMotion step, 120/3). The player's cap (shown above) returns with the race. The phase is the core mod's
+    // (host_d9_game_phase: 1 front end, 2 racing, 3 paused); rateTick re-applies on a change.
+    _phaseApplied = host_d9_game_phase();
+    _visibleApplied = g_visible.load();
+    const char *why = "";
+    if (_visibleApplied || _phaseApplied == 3) {
+        cap = std::min(cap, 30);
+        why = _visibleApplied ? " (panel open)" : " (paused)";
+    } else if (_phaseApplied == 1 && cap > 40) {
+        cap = 40;
+        why = " (menus)";
+    }
     mods_display_set_fps_override(cap); // the game's Present deadline and the presenter's pacing
     // ProMotion picks its refresh from the frame-rate ranges in flight; a display link that does nothing but
     // ask for the cap keeps the panel from settling below it (or racing above it) while the game presents.
@@ -411,10 +440,12 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         [self.rateHint addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
     self.rateHint.preferredFrameRateRange = CAFrameRateRangeMake((float)cap, (float)cap, (float)cap);
-    fprintf(stderr, "[ios] overlay: frame cap %d fps\n", cap);
+    fprintf(stderr, "[ios] overlay: frame cap %d fps%s\n", cap, why);
 }
 
 - (void)rateTick:(CADisplayLink *)link {
+    if (host_d9_game_phase() != _phaseApplied || g_visible.load() != _visibleApplied)
+        [self applyFrameCap];
 }
 
 - (void)thermalChanged:(NSNotification *)note {
@@ -656,12 +687,12 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.perf = perf;
     self.maxPerf = [self switchFor:kMaxPerf action:@selector(maxPerfChanged:)];
     [perfRows insertObject:[self rowWithTitle:[self label:@"Max performance (experimental)" style:UIFontTextStyleHeadline]
-                                       detail:[self note:@"For hotter or older devices, aiming at 60 fps: Low detail "
-                                                         @"with every heavy effect off (shadows, smoke, particles, "
-                                                         @"bloom, blur, mirror detail) and dynamic resolution on. The "
-                                                         @"car keeps its HD textures and your resolution stays as you "
-                                                         @"set it. Your own settings come back when you turn it off. "
-                                                         @"Restart to apply."]
+                                       detail:[self note:@"For hotter or older devices: a steady 60 fps (the frame cap "
+                                                         @"is held at 60 while it's on), Low detail with every heavy "
+                                                         @"effect off (shadows, smoke, particles, bloom, blur, mirror "
+                                                         @"detail) and dynamic resolution on. Roads and cars keep "
+                                                         @"their detail, sharp textures and HD car paint. Your own "
+                                                         @"settings come back when you turn it off. Restart to apply."]
                                       control:self.maxPerf]
                    atIndex:0];
     UIStackView *perfStack = [[UIStackView alloc] initWithArrangedSubviews:perfRows];
@@ -1246,6 +1277,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
             set_mod_setting(k.UTF8String, [saved[k] longLongValue]);
         [d removeObjectForKey:kMaxPerfSaved];
     }
+    [self applyFrameCap];   // 60 and locked while the mode is on; the player's own cap again when it goes off
     fprintf(stderr, "[ios] overlay: max performance %s (restart to apply)\n", sw.on ? "on" : "off");
     [self refreshPerf];
     [self showRestartNotice:sw.on];
@@ -1373,13 +1405,17 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [self.window bringSubviewToFront:self.root];
     self.root.hidden = NO;
     g_visible = true;
+    host_ios_panel_focus(true);   // the game pauses (in a race) while the panel is open
     [self showTab:_tab];
+    [self applyFrameCap];         // 30 fps while open
 }
 - (void)close {
     _captureKey.clear();
     mods_menu_close_headless(); // as closing the F10 page: an unapplied Graphics change is discarded
     self.root.hidden = YES;
     g_visible = false;
+    host_ios_panel_focus(false);
+    [self applyFrameCap];
 }
 - (void)openOnTab:(NSInteger)tab {
     _tab = tab;
@@ -1497,6 +1533,7 @@ void ios_overlay_apply_launch_settings() {
     setenv("RECOMP_FE_FIT_WIDE", "1", 0);      // the widescreen menus fit a 4:3 iPad (core mod video_modes.h)
     setenv("RECOMP_HIDE_GAME_CURSOR", "1", 0); // only the iPad's own pointer, not the game's arrow as well
     setenv("RECOMP_TOD_STEPS", "1200", 0);     // the day cycle's sun moves in steps: steady car shadows in races
+    setenv("RECOMP_D3D9_CUBE_HALF", "1", 0);   // the car reflection's busiest faces redraw every other frame (heat)
     host_upscale_set_rows(0);
     // The game's resolution (main.cpp note_screen_size reads it before the game boots).
     // Effects (glow, depth of field, motion blur) at the 3D resolution is the default: on an iPhone it saves GPU

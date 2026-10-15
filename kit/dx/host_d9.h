@@ -223,6 +223,11 @@ void host_d9_pool_mark(uint64_t key, int state);
 // both. Queued in order with the draws.
 enum { HOST_D9_SCENE_END = 252, HOST_D9_SCENE_BEGIN = 253 };
 void host_d9_scene_split(uint32_t phase, uint32_t bb, uint32_t ds);
+// v2.4: the core mod's game phase, private render state 248 (never device state), sent with each 3D scene: 1 the
+// front end, 2 racing / free roam, 3 the world paused. host_d9_game_phase is the last one (0: none yet); any thread.
+// The iOS panel holds the front end at 60 fps and a pause at 30 (ios_overlay.mm applyFrameCap).
+enum { HOST_D9_GAME_PHASE = 248 };
+uint32_t host_d9_game_phase(void);
 // Remaster run 14 foundation F1 (review/run14/foundation-design.md 1, G): the core mod's camera for the scene window,
 // sent only with RECOMP_REMASTER_FOUNDATION=1 as two private SetTransform states the device turns into one event (never
 // device state; 0x200/0x201 are outside D3D's transform range). `view`: the camera's world -> view matrix, 16 floats,

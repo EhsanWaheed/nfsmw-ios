@@ -31,6 +31,7 @@
 #include "d3d9_volume.h"
 #include "host_d9.h"
 #include "d3d9_msaa.h"
+#include <atomic>
 #include <unordered_map>
 #include <map>
 #include <tuple>
@@ -578,11 +579,18 @@ static uint8_t *resource_bytes(ComObj *o);
 // (this, Count, pRects, Flags, Color, Z, Stencil). Only the colour target is
 // real so far: a 32-bit surface is filled with the colour, over the listed
 // D3DRECTs or the whole surface.
+static uint64_t g_d9_presents;            // Dev_Present's count (v2.4 cube_face_rest)
+static bool cube_face_rest(ComObj *dev);  // below, with null_draw
+
 void Dev_Clear(X86 *c) {
     ComObj *dev = this_device9(c);
     uint32_t count = arg(c, 1), rects = arg(c, 2), flags = arg(c, 3), color = arg(c, 4);
     if (!dev) {
         com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    if (cube_face_rest(dev)) {   // v2.4: a resting car reflection face keeps its picture
+        com_ret(c, D3D_OK9);
         return;
     }
     if (gpu_on()) {
@@ -640,6 +648,7 @@ static void pool_stats_frame();   // Remaster run 10 (below gpu_draw)
 // on screen.
 void Dev_Present(X86 *c) {
     ComObj *dev = this_device9(c);
+    ++g_d9_presents;
     if (dev) {
         const int fps = recomp_env("PIN_CLOCK") ? 0 : mods_display_fps();
         if (fps != dev->present_fps) {
@@ -2248,10 +2257,43 @@ static void raster(X86 *c, const D9DrawCall &call) {
 
 // (this, PrimitiveType, StartVertex, PrimitiveCount)
 static bool draw_refused(X86 *c, const char *what, uint32_t prim, uint32_t count, uint32_t vertices, uint32_t stride);
+// v2.4 (iOS heat, the owner's 14 Oct trace: the car reflection map was 700-1000 draws a frame): with
+// RECOMP_D3D9_CUBE_HALF=1 (the iOS host sets it) a cube face drawn in the last frame rests this frame, its draws and
+// clears skipped at entry (no conversion, queue or GPU work) and its picture kept. The game redraws two faces every
+// frame and the other four in turn: those two now redraw every other frame, the others as before. 0: every frame.
+static bool cube_face_rest(ComObj *dev) {
+    static const bool on = [] { const char *e = getenv("RECOMP_D3D9_CUBE_HALF"); return e && *e == '1'; }();
+    if (!on || !dev)
+        return false;
+    ComObj *s = com_get(d9_pipeline(dev->id).color_target[0]);
+    if (!s)
+        s = com_get(dev->render_target);
+    if (!s)
+        return false;
+    uint32_t slot;
+    ComObj *owner = com_get(mirror_slot(s, &slot));
+    if (!owner || owner->kind != K_D3D9TEXTURE || !owner->caps || slot >= 6)   // a cube's top level only
+        return false;
+    struct Face { uint64_t decided = ~0ull, drawn = ~0ull; bool rest = false; };
+    static std::unordered_map<uint64_t, Face> faces;
+    Face &f = faces[(uint64_t)owner->id * 8u + slot];
+    if (f.decided != g_d9_presents) {   // the first draw or clear into this face this frame decides
+        f.decided = g_d9_presents;
+        f.rest = f.drawn != ~0ull && f.drawn + 1 == g_d9_presents;
+        if (!f.rest)
+            f.drawn = g_d9_presents;
+    }
+    return f.rest;
+}
+
 // Remaster A4 gate (TEST ONLY): A/B switch nulldraw. During OLD periods every draw returns D3D_OK at entry without
 // any shim or host work (frames are not drawn), so the game-thread time saved is the most that moving draw work off
 // the game thread could save. Opt-in only: never part of the default "all switches" set.
 static bool null_draw(X86 *c) {
+    if (cube_face_rest(this_device9(c))) {   // v2.4: a resting car reflection face (above)
+        com_ret(c, D3D_OK9);
+        return true;
+    }
     // Remaster P1 (TEST ONLY): RECOMP_REMASTER_POOLDRAW_NULL=1 with A/B switch poolnull: in OLD periods only the draws
     // made while the clean pool pass is in effect return at entry (the pool pass's states and constants still apply).
     // Diagnostic: it bounds the pool draws' shim share (their deferred sync moves to the next draw). Needs PROF=1.
@@ -3556,9 +3598,19 @@ void Dev_SetTextureStageState(X86 *c) {
     com_ret(c, D3D_OK9);
 }
 
+static std::atomic<uint32_t> g_game_phase{0};
+extern "C" uint32_t host_d9_game_phase(void) {
+    return g_game_phase.load(std::memory_order_relaxed);
+}
+
 void Dev_SetRenderState(X86 *c) {
     ComObj *dev = this_device9(c);
     uint32_t state = arg(c, 1);
+    if (dev && state == HOST_D9_GAME_PHASE) {   // v2.4: the core mod's game phase (host_d9.h), never device state
+        g_game_phase.store(arg(c, 2), std::memory_order_relaxed);
+        com_ret(c, D3D_OK9);
+        return;
+    }
     // Remaster run 13 MetalFX upscaling: private states 252/253 are the core mod's scene markers, events for the
     // renderer and never device state (the draw tables stay as they were). A begin counts only while the back
     // buffer is render target 0; it names the depth surface bound with it.

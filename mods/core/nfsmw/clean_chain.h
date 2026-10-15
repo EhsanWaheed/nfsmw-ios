@@ -747,8 +747,29 @@ static void clean_chain_run(const PopModApi *api, uint32_t dev, uint32_t bb, uns
      * at the light ceiling (64), not at SDR white (its clamp of the game's opaque draws); reset right after. */
     const uint32_t hdr_on[] = {249, 1}, hdr_off[] = {249, 0};
     if (g_cc_hdr) pfx_call(dev, 0xe4, hdr_on, 2);
+    /* v2.4 (iOS heat, owner 14 Oct): the exposure measurement (the two luminance reductions and the adaptation) runs
+     * every other frame; between, the exposure passes read the last one (AdaptHistory stays put: g_cc_cur is turned
+     * to the history just written, and back after). Adaptation takes a second or more, so a 1/60 s older value is
+     * invisible; the adaptation pass gets the time since its last run, so it adapts at the same speed.
+     * NFSMW_MEASURE_EVERY=1 measures every frame (as before). */
+    static int measure_every = -1;
+    if (measure_every < 0) { const char *e = getenv("NFSMW_MEASURE_EVERY"); measure_every = e && *e == '1' ? 1 : 2; }
+    static unsigned measure_phase;
+    static float measure_dt;
+    measure_dt = reset ? 0.0f : measure_dt + dt;
+    const int measure = reset || measure_every == 1 || (measure_phase++ & 1u) == 0;
+    if (!measure) g_cc_cur ^= 1u;   /* .cur = the history the last measurement wrote */
     for (unsigned i = 0; i < g_cc_np; ++i) {
         const CcPass *p = &g_cc_p[i];
+        const char *dn = p->dst >= 0 ? g_cc_t[p->dst].name : "";
+        const int measuring = !strncmp(dn, "Luma", 4) || !strncmp(dn, "Q4", 2) || !strcmp(dn, "LogMean") ||
+                              !strcmp(dn, "AdaptHistory");
+        if (measuring && !measure) continue;
+        const int adapt = !strcmp(dn, "AdaptHistory");
+        if (adapt) {   /* the time since the last adaptation (each frame's share clamped as before) */
+            const float ha[4] = {measure_dt > 0.2f ? 0.2f : measure_dt, host[1], host[2], host[3]};
+            cc_set4(g_cc_p_host, ha);
+        }
         if ((p->sun && !g_cc_sun_on) || (p->glow && !g_cc_glow_on)) continue;
         if (p->ao && (!g_cc_ao_on || (p->aoblur && g_cc_ao_view == 2))) continue;   /* ssao off: before any device call */
         if (p->mirror || !(p->gmask >> (g_cc_grade_on ? g_cc_grade_route : 0) & 1)) continue;   /* mirror: below; G2 state: before any device call */
@@ -757,11 +778,14 @@ static void clean_chain_run(const PopModApi *api, uint32_t dev, uint32_t bb, uns
             continue;
         }
         cc_pass(dev, p, g_cc_grade_on && g_cc_grade_route == 1 && p->alt >= 0 ? p->alt : p->dst, bb);
+        if (adapt) cc_set4(g_cc_p_host, host);
     }
     if (g_cc_mirror_np && cc_mirror_prepare(api, dev)) {   /* mirror grade + glass: after every main pass */
         for (unsigned i = 0; i < g_cc_np; ++i) if (g_cc_p[i].mirror) cc_pass(dev, &g_cc_p[i], CC_MIRROR, bb);
         cc_mirror_done();
     }
+    if (!measure) g_cc_cur ^= 1u;   /* back (after the mirror grade, which reads it too): not turned this frame (below) */
+    else measure_dt = 0.0f;
     if (g_cc_hdr) pfx_call(dev, 0xe4, hdr_off, 2);
     for (unsigned s = 1; s < CC_MAXS; ++s) {
         if (!(g_cc_stages & (1u << s))) continue;
@@ -795,7 +819,7 @@ static void clean_chain_run(const PopModApi *api, uint32_t dev, uint32_t bb, uns
         }
         fprintf(g_cc_trace, "\n");
     }
-    g_cc_cur ^= 1u;   /* this frame's .cur is next frame's .prev */
+    if (measure) g_cc_cur ^= 1u;   /* this frame's .cur is next frame's .prev (a frame without the measurement wrote none) */
     if (++g_cc_frames == 1) api->log(api, "core.nfsmw: effects: first frame drawn");
 }
 

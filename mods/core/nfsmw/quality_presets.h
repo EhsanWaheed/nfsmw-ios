@@ -28,7 +28,14 @@ static uint64_t g_qp_tick;
 
 static int qp_caps_ready(void) { return get_u32(0x0090187cu) != 0; /* world detail cap, set at hardware detection */ }
 static uint32_t qp_want(int tier, int i) {
-    const uint32_t v = k_qp_recipe[tier][i];
+    uint32_t v = k_qp_recipe[tier][i];
+    /* The iOS panel's Max performance (RECOMP_IOS_LOW_POWER; owner 14 Oct: "the road looked low polygon, car and
+     * road must look cleaner"): its Low keeps Medium's world detail, anisotropic filtering and car reflection
+     * detail 1. Trees, reflections and effects stay at Low. */
+    static int low_power = -1;
+    if (low_power < 0) { const char *e = getenv("RECOMP_IOS_LOW_POWER"); low_power = e && *e == '1'; }
+    if (low_power && tier == 0 && (i == 1 || i == 3 || i == 6))
+        v = i == 1 ? 1u : 2u;
     if (!qp_caps_ready()) return v;
     const uint32_t cap = get_u32(k_qp_addr[i] + 0x88u);
     return v < cap ? v : cap;

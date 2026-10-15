@@ -144,6 +144,7 @@ struct Tex {
     gpu::Texture imported;
     uint64_t used = 0; // the last frame serial that read or wrote it
     uint64_t written = 0;
+    uint64_t outside_frame = 0; // v2.4 follow_begin: 1 + the present count when a pass last drew into it outside a scene
     uint32_t generation = 0, revision = 0; // opt-in metadata trace identity
     float scale = 1.0f; // physical pixels per guest pixel: render targets are rendered larger
     bool cube = false, depth = false; // what `texture` is, without asking it
@@ -1352,7 +1353,17 @@ class Renderer final : public D9Backend {
             return;
         if (t.info.pixel == MTLPixelFormatDepth32Float_Stencil8)
             return;     // the game's view of a depth buffer is not uploaded
-        settle(t.used); // draws already encoded read the old contents
+        // Draws already encoded read the old contents. v2.4 (the owner's 14 Oct trace: 5 command buffers a frame, the
+        // game ~90 fps with the CPU and GPU half idle): a texture still in use by the GPU is no longer waited for
+        // (settle commits and blocks on the GPU); a plain 2D upload goes through a staging buffer and a blit queued
+        // after those draws (staged_upload below). Volumes and scaled targets still settle. OFF by default (TEST:
+        // RECOMP_STAGED_UPLOADS=1): the intro movie uploaded its frames fast enough that the staging buffers grew the
+        // device's memory by 1 GB in 0.6 s and iOS killed the game (owner's iPhone, 15 Oct).
+        static const bool staged_on = [] { const char *e = getenv("RECOMP_STAGED_UPLOADS"); return e && *e == '1'; }();
+        const bool busy = t.used && t.used > completed_.load();
+        const bool staged = staged_on && busy && !volume && t.scale == 1.0f && !t.promoted;
+        if (!staged)
+            settle(t.used);
         if (rtex_.on()) {
             rtex_.upload(t.desc, face, level, bytes, pitch);
             if (t.desc.key && !level && !face && t.desc.kind == HOST_D9_TEX_2D) {
@@ -1400,6 +1411,17 @@ class Renderer final : public D9Backend {
             return;
         }
         MTLRegion region = MTLRegionMake2D(0, 0, w, h);
+        if (staged) {
+            const uint8_t *src = bytes;
+            uint32_t row = pitch, rows = t.info.block ? (h + 3) / 4 : h;
+            if (!t.info.block && t.info.conv != Conv::Direct) {
+                convert(t.info.conv, bytes, w, h, pitch, scratch_);
+                src = scratch_.data();
+                row = w * 4;
+            }
+            staged_upload(t, face, level, w, h, src, row, rows);
+            return;
+        }
         if (t.scale != 1.0f) {
             // The game wrote a scaled target: stretch its pixels to the target's size.
             std::vector<uint8_t> packed;
@@ -4559,6 +4581,10 @@ class Renderer final : public D9Backend {
             device_->commit(cb);
         }
         ++presents_;
+        if (presents_ % 600 == 0)   // v2.4: GPU waits left vs uploads that no longer wait (staged_upload)
+            fprintf(stderr, "[gpu] frame %llu: %llu GPU waits, %llu staged texture uploads so far\n",
+                    (unsigned long long)presents_, (unsigned long long)settle_waits_,
+                    (unsigned long long)staged_uploads_);
         g_host_game_gpu_frames.fetch_add(1, std::memory_order_relaxed);
         hdr_latch(backbuffer);   // PLAN_R2 item 10: the next frame's format
         if (presents_ % 300 == 1)
@@ -5200,10 +5226,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         float s = bt->scale / upscale_factor_;
         // A host's scene height (upscale_control.h) replaces the launch factor: the backing is that many physical
         // rows, at most 4x below the back buffer; at or above the back buffer's own height the scene draws native.
-        // Above 5/6 of it the scene is drawn at 5/6 (v2.3 drew it native, which turned MetalFX off at most players'
-        // steps): the spatial scaler at a ratio that close to 1 (800 rows onto 900: 9/8) is sharp where output and
-        // scene pixels line up and soft between, a grid of lines every 1/(ratio-1) scene pixels (8 there) on the whole
-        // picture. 5/6 is v2.2's 600p at the 720p output, which showed none.
+        // Above 5/6 of it the scene is drawn at 5/6 (v2.4; v2.3 drew it native, which turned MetalFX off at most
+        // players' steps): the spatial scaler at a ratio that close to 1 (800 rows onto 900: 9/8) is sharp where
+        // output and scene pixels line up and soft between, a grid of lines every 1/(ratio-1) scene pixels (8 there)
+        // on the whole picture. The iOS panel's steps are 5/6 and 3/4 of the output (v2.2's 600p and 540p at 720p).
         if (int rows = g_upscale_rows.load(std::memory_order_relaxed); rows >= 0) {
             const float native_rows = bt->desc.height * bt->scale;
             if (rows == 0 || rows >= native_rows - 0.5f) {
@@ -5223,6 +5249,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         swap_backing(*bt);
         if (dt)
             swap_backing(*dt);
+        if (up_follow_)
+            follow_begin(*bt, bb, up_.ds, s);
         up_.open = true;
         up_.begun_frame = true;
         up_.bb = bb;
@@ -5255,6 +5283,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         }
         end_pass();
         up_.open = false;
+        follow_end();
         Tex *bt = tex_ptr(up_.bb);
         Tex *dt = up_.ds ? tex_ptr(up_.ds) : nullptr;
         if (!bt || !bt->aliased) {
@@ -5444,7 +5473,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     "[remaster] upscale: frames %llu scaled %llu skipped %llu mode %d in %ux%u out %lux%lu "
                     "(factor %.2f, temporal %s) | must be 0: bb_before %llu fitted %llu failures %llu nested %llu "
                     "refused %llu | info: stray_end %llu no_end %llu depth_mismatch %llu replayed %llu allocs %llu "
-                    "aborts %llu\n",
+                    "aborts %llu | effect targets at the scene size %.1f/scene%s\n",
                     (unsigned long long)up_.frames, (unsigned long long)up_.scaled,
                     (unsigned long long)up_.skipped, upscale_factor_ <= 1.5f ? 1 : 2, up_.in_w, up_.in_h,
                     (unsigned long)up_.sc_ow, (unsigned long)up_.sc_oh, upscale_factor_,
@@ -5454,13 +5483,51 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     (unsigned long long)up_.refused, (unsigned long long)up_.stray_end,
                     (unsigned long long)up_.no_end, (unsigned long long)up_.depth_mismatch,
                     (unsigned long long)up_.replayed, (unsigned long long)up_.allocs,
-                    (unsigned long long)up_.aborts);
+                    (unsigned long long)up_.aborts,
+                    up_.follow_frames ? (double)up_.follow_swaps / (double)up_.follow_frames : 0.0,
+                    up_follow_ ? "" : " (off)");
     }
     // The back buffer or scene depth is redefined or dropped inside the scene: the other one goes back to native
     // and this frame's scene is lost (counted).
+    // The scene-following effect targets (up_.followers): every 2D colour render target the size of the frame, a
+    // half or a quarter of it (rounded up, as the clean chain sizes them), not the frame or its depth, not
+    // multisampled, float or already aliased, and drawn only inside scenes for the last 120 frames: a target drawn
+    // before the scene and read in it (a reflection the game renders first) keeps its own backing. Each one gets a
+    // backing at the scene's scale `s` and is swapped in.
+    void follow_begin(const Tex &bt, uint32_t bb, uint32_t ds, float s) {
+        up_.followers.clear();
+        ++up_.follow_frames;
+        const uint32_t fw = bt.desc.width, fh = bt.desc.height;
+        for (auto &kv : textures_) {
+            Tex &t = kv.second;
+            if (kv.first == bb || kv.first == ds || !t.texture || t.depth || t.cube || t.aliased || t.msaa || t.promoted ||
+                t.desc.kind != HOST_D9_TEX_2D || !(t.desc.usage & HOST_D9_USAGE_RENDERTARGET) || t.info.block ||
+                t.scale != bt.alt_scale ||   // the native scale the frame had: a target made like the frame
+                (t.outside_frame && presents_ + 1 - t.outside_frame <= 120))
+                continue;
+            bool follows = false;
+            for (uint32_t div : {1u, 2u, 4u})
+                if (t.desc.width == (fw + div - 1) / div && t.desc.height == (fh + div - 1) / div)
+                    follows = true;
+            if (!follows || !ensure_backing(t, s))
+                continue;
+            swap_backing(t);
+            up_.followers.push_back(kv.first);
+        }
+        up_.follow_swaps += up_.followers.size();
+    }
+    void follow_end() {
+        for (uint32_t id : up_.followers)
+            if (Tex *t = tex_ptr(id))
+                if (t->aliased)
+                    swap_backing(*t);
+        up_.followers.clear();
+    }
     void upscale_abort(uint32_t id) {
         up_.open = false;
         ++up_.aborts;
+        up_.followers.erase(std::remove(up_.followers.begin(), up_.followers.end(), id), up_.followers.end());
+        follow_end();
         for (uint32_t other : {up_.bb, up_.ds})
             if (other && other != id)
                 if (Tex *t = tex_ptr(other))
@@ -6000,6 +6067,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             pass_samples_ = samples;
             pass_color_[i] = tex;
             ct->used = serial_ + (cmd_ ? 0 : 1);
+            if (!up_.open)
+                ct->outside_frame = presents_ + 1;
             if (ms) {
                 rp.colorAttachments[i].texture = ct->msaa;
                 rp.colorAttachments[i].resolveTexture = tex;
@@ -6243,6 +6312,46 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         return t;
     }
 
+    // v2.4 (upload above): the new contents of one level/face of a texture the GPU still reads, copied into a
+    // staging buffer and blitted in the current command buffer, after the draws that read the old contents (the
+    // queue keeps encoders and command buffers in order, and the texture's hazard tracking orders the write after
+    // those reads). No CPU wait, no extra commit. `row` bytes per row (per block row for compressed), `rows` rows.
+    uint64_t staged_uploads_ = 0, settle_waits_ = 0;
+    void staged_upload(Tex &t, uint32_t face, uint32_t level, uint32_t w, uint32_t h, const uint8_t *src,
+                       uint32_t row, uint32_t rows) {
+        id<MTLBuffer> staging = [mtl_ newBufferWithBytes:src length:(NSUInteger)row * rows
+                                                 options:MTLResourceStorageModeShared |
+                                                         MTLResourceCPUCacheModeWriteCombined];
+        if (!staging) {   // out of memory: the old way
+            settle(t.used);
+            [t.texture replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:src
+                         bytesPerRow:row bytesPerImage:0];
+            return;
+        }
+        end_pass();
+        begin_frame();
+        id<MTLBlitCommandEncoder> blit = [cmd_ blitCommandEncoder];
+        [blit copyFromBuffer:staging
+                   sourceOffset:0
+              sourceBytesPerRow:row
+            sourceBytesPerImage:(NSUInteger)row * rows
+                     sourceSize:MTLSizeMake(w, h, 1)
+                      toTexture:t.texture
+               destinationSlice:face
+               destinationLevel:level
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        t.used = serial_;
+        ++staged_uploads_;
+        // The command buffer keeps its staging buffers until it completes, and a movie uploads a frame after frame with
+        // no Present to commit them (the owner's first run: 3.4 GB at the intro). Past 32 MB the buffer is committed
+        // (no wait); the next draw opens a new one.
+        staged_bytes_ += (uint64_t)row * rows;
+        if (staged_bytes_ > (32ull << 20))
+            flush();
+    }
+    uint64_t staged_bytes_ = 0;   // staging bytes held by the open command buffer (flush resets it)
+
     void begin_frame() {
         if (cmd_)
             return;
@@ -6279,6 +6388,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             vis_ = nil;
         }
         [cmd_ commit];
+        staged_bytes_ = 0;
         if (trace_) {
             submitted_ = serial_;
             trace_->event("submit", trace_context());
@@ -6300,6 +6410,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     void settle(uint64_t used) {
         if (!used || used <= completed_.load())
             return;
+        ++settle_waits_;   // v2.4: reported with the staged uploads (present)
         end_pass();
         if (cmd_ && used >= serial_)
             flush();
@@ -7173,7 +7284,18 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         NSUInteger sc_iw = 0, sc_ih = 0, sc_ow = 0, sc_oh = 0;
         MTLPixelFormat sc_fmt = MTLPixelFormatInvalid;
         id<MTLDepthStencilState> zwrite = nil, znone = nil;
+        // v2.4 (RECOMP_UPSCALE_EFFECTS_INTERNAL=1): the effect targets that follow the frame's size (the frame, a
+        // half, a quarter of it: the clean chain's copies, AO, bloom, DoF, sun) get a scene-scaled backing while the
+        // scene is open, as the back buffer does, so the effects that already work from the scene's pixels stop
+        // drawing 1/(scale^2) more of them. `followers` are the ones swapped this scene; `fsize` caches the scan.
+        std::vector<uint32_t> followers;
+        uint64_t follow_frames = 0, follow_swaps = 0;
     } up_;
+    const bool up_follow_ = [] {
+        const char *e = getenv("RECOMP_UPSCALE_EFFECTS_INTERNAL");
+        const char *off = getenv("RECOMP_UPSCALE_FOLLOW");
+        return e && *e == '1' && !(off && *off == '0');
+    }();
     // Remaster run 14 foundation F1-F3 (review/run14/foundation-design.md 1-3; TEST ONLY until a consumer passes its
     // gates). RECOMP_REMASTER_FOUNDATION=1 (the core mod then sends the scene markers also without upscaling, and the
     // camera): the scene window, the VP probe, the motion vectors and the history resets. Unset: nothing below runs

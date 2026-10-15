@@ -81,8 +81,32 @@ static void up_send_camera(uint32_t dev) {
     ++g_up_cams;
 }
 
+/* v2.4: the game phase for the host (private render state 248, kit/dx/host_d9.h), with every 3D scene: 1 the front
+ * end, 2 the world running, 3 the world paused. Paused = the simulation clock [0x009885d8] (eo_sim_step) unchanged for
+ * 30 scenes in a row: at a 120 fps cap the 60 Hz simulation advances only every other frame. */
+static void up_send_phase(void) {
+    static float last_sim = -1.0f;
+    static unsigned still;
+    const uint32_t dev = get_u32(0x00982bdcu);
+    if (!dev) return;
+    uint32_t phase = 1;
+    if (get_u32(0x00925e90u) == 6) {
+        const float now = get_float(0x009885d8u);
+        still = now == last_sim ? still + 1 : 0;
+        last_sim = now;
+        phase = still >= 30 ? 3 : 2;
+    }
+    static uint32_t sent;
+    if (phase == sent) return;
+    sent = phase;
+    uint32_t a[3] = {dev, 248u, phase}, r = 0;
+    const uint32_t fn = get_u32(get_u32(dev) + 0xe4u);
+    if (fn) g_api->guest_call(g_api, fn, 0, a, 3, &r);
+}
+
 static void up_scene_begin(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv, void *user) {
     (void)cpu; (void)inv; (void)user;
+    if (g_up_frontend) up_send_phase();   /* iOS only (the host that asks for the front end's scene) */
     /* The world only, unless the host asks for the front end too (iOS: its garage scene at the screen's size cost
      * an iPhone more than a race did, owner 12 Oct); a screen without a main view sends no begin either way. */
     if (get_u32(0x00925e90u) != 6 && !g_up_frontend) return;

@@ -1465,10 +1465,17 @@ void handle_event(const SDL_Event &event) {
 // means take what is already there and return; a real wait is a genuine sleep
 // inside SDL, which is what stops the host spinning while the guest waits.
 // Returns true when something changed the input state.
+// Sub-millisecond waits sleep instead of spinning: always on iOS (v2.4; it was Max performance only), where a
+// spin to every frame's deadline is heat for nothing; RECOMP_IOS_LOW_POWER=0 restores the spin. Elsewhere only
+// with RECOMP_IOS_LOW_POWER=1.
 bool low_power_wait() {
     static const bool on = [] {
         const char *e = getenv("RECOMP_IOS_LOW_POWER");
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        return !(e && *e == '0');
+#else
         return e && *e == '1';
+#endif
     }();
     return on;
 }
@@ -2411,3 +2418,12 @@ extern "C" int host_display_screen_size(int *w, int *h) {
     host_landscape_screen_size(sw, sh, w, h);
     return 1;
 }
+
+#if TARGET_OS_IPHONE
+// v2.4 (owner 15 Oct: "pause game when overlay onscreen"): the iOS settings panel takes the game's focus while it is
+// open, as switching away from the game's window does on a PC; the game answers with its own pause in a race. Back
+// when the panel closes (if the app itself still has the focus). Main thread.
+extern "C" void host_ios_panel_focus(bool open) {
+    note_focus(!open && window_focused());
+}
+#endif
