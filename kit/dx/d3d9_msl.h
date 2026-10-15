@@ -162,8 +162,13 @@ struct PixelVariant {
     // 1 - (1 - a)^(alphak / 16) (n layers of alpha a cover as n / k layers of that alpha), before the soft fade. The core
     // mod marks the draw (private render state 240 = k x 16, smoke.h). Unchanged source when 0.
     uint8_t alphak = 0;
+    // v2.5 MetalFX temporal (MSL only): 1 = also write the draw's motion to colour 1 (RG: previous minus current
+    // position in UV units, x right, y down; x = 60000 where the vertex half had no previous position, so the host's
+    // camera pass fills it). Reads mv_c / mv_p (pair it with VertexVariant motion). pixel_source fails if the program
+    // writes more than colour 0.
+    uint8_t motion = 0;
     uint64_t key() const {
-        return (alphak ? 0x3b9aca07d1b54a33ull * alphak : 0) ^ (smoke ? 0x4cf5ad432745937full * smoke : 0) ^ (hdr ? 0x7c4a7d9f3e1b2c55ull * hdr : 0) ^((uint64_t)sky * 0x3956c25bb9b0e2d3ull) ^ ((uint64_t)parallax * 0x2545f4914f6cdd1dull) ^ ((uint64_t)carpaint * 0x8cb92ba72f3d8dd7ull) ^ ((uint64_t)alpha_mask << 48 | (uint64_t)depth_mask << 32 | (uint64_t)cube_mask << 16 |
+        return (motion ? 0x2f8a9c1d5e7b3a61ull : 0) ^ (alphak ? 0x3b9aca07d1b54a33ull * alphak : 0) ^ (smoke ? 0x4cf5ad432745937full * smoke : 0) ^ (hdr ? 0x7c4a7d9f3e1b2c55ull * hdr : 0) ^((uint64_t)sky * 0x3956c25bb9b0e2d3ull) ^ ((uint64_t)parallax * 0x2545f4914f6cdd1dull) ^ ((uint64_t)carpaint * 0x8cb92ba72f3d8dd7ull) ^ ((uint64_t)alpha_mask << 48 | (uint64_t)depth_mask << 32 | (uint64_t)cube_mask << 16 |
                 projected_mask) ^
                ((uint64_t)a2c * 0x9e3779b97f4a7c15ull) ^ ((uint64_t)soft * 0xc2b2ae3d27d4eb4full) ^
                ((uint64_t)wetroad * 0x165667b19e3779f9ull) ^ ((uint64_t)shadowpcf * 0x27d4eb2f165667c5ull) ^
@@ -202,8 +207,12 @@ struct VertexVariant {
     // Remaster run 14 lit smoke: 1 = also write t7 = the raw POSITION0 input (particle quads are built in world space,
     // 006c1160). vertex_source fails if the body writes t7 or POSITION0 is not declared.
     uint8_t smoke = 0;
+    // v2.5 MetalFX temporal: 1 = also write mv_c (the clip position before the half-pixel and jitter fixup) and mv_p
+    // (the same vertex through the previous frame's clip rows at vertex buffer(20), when oPos is the 4 dot products
+    // of one input with c[clip..clip+3]; float4(0) otherwise: no previous position).
+    uint8_t motion = 0;
     uint64_t key() const {
-        return (smoke ? 0x8f1bbcdcbfa53e0bull : 0) ^ (sky ? 0x59f111f1923f82a4ull : 0) ^(pool ? 0x6a09e667f3bcc908ull + pool : 0) ^ (pbr ? 0xbb67ae8584caa73bull : 0) ^
+        return (motion ? 0x71c3e5a9b2d4f607ull : 0) ^ (smoke ? 0x8f1bbcdcbfa53e0bull : 0) ^ (sky ? 0x59f111f1923f82a4ull : 0) ^(pool ? 0x6a09e667f3bcc908ull + pool : 0) ^ (pbr ? 0xbb67ae8584caa73bull : 0) ^
                (carenv ? 0x3c6ef372fe94f82bull : 0) ^ (carenv == 2 ? 0x5be0cd19137e2179ull : 0) ^ (glass ? 0xa54ff53a5f1d36f1ull : 0) ^ (glass == 2 ? 0x1f83d9abfb41bd6bull : 0) ^
                (fefloor ? 0x9b05688c2b3e6c1full : 0) ^ (grass ? 0x1f83d9abfb41bd6bull + grass : 0) ^
                (grass_blade ? 0x2b992ddfa23249d6ull + grass_blade : 0);

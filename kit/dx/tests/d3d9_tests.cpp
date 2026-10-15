@@ -1264,6 +1264,36 @@ static void test_foundation() {
         const d9sh::Program &shuffled = d9sh::program_for(vs(bad, -1));
         CHECK(!d9msl::vertex_clip_regs(shuffled, &c));
     }
+    // (1b) v2.5 MetalFX temporal: the motion pair (previous rows at buffer(20) for the 4-dp4 form, zero otherwise;
+    // colour 1 in the pixel half). RECOMP_TEST_MOTION_DUMP=<dir> writes the three sources for an offline compile.
+    {
+        const int r[4] = {4, 5, 6, 7}, bad[4] = {4, 5, 7, 6};
+        d9msl::VertexVariant mv;
+        mv.motion = 1;
+        std::string form, plain, why;
+        CHECK(d9msl::vertex_source(d9sh::program_for(vs(r, 8)), mv, &form, &why));
+        CHECK(form.find("o.mv_p = float4(dot(vv[0], mvp[0])") != std::string::npos);
+        CHECK(form.find("float4 mv_c; float4 mv_p;") != std::string::npos);
+        CHECK(form.find("[[buffer(20)]]") != std::string::npos);
+        CHECK(d9msl::vertex_source(d9sh::program_for(vs(bad, -1)), mv, &plain, &why));
+        CHECK(plain.find("o.mv_p = float4(0.0);") != std::string::npos);
+        const std::vector<uint32_t> pw = {0xFFFF0200u, 0x02000001u, 0x800F0800u, 0xA0E40000u, 0x0000FFFFu};
+        std::vector<uint8_t> pb(pw.size() * 4);
+        memcpy(pb.data(), pw.data(), pb.size());
+        d9msl::PixelVariant pm;
+        pm.motion = 1;
+        std::string ps;
+        CHECK(d9msl::pixel_source(d9sh::program_for(pb), pm, &ps, &why));
+        CHECK(ps.find("float4 mv [[color(1)]];") != std::string::npos);
+        CHECK(ps.find("o.mv = mp.w") != std::string::npos);
+        if (const char *dir = getenv("RECOMP_TEST_MOTION_DUMP"))
+            for (const auto &kv : {std::make_pair("vs_form", &form), std::make_pair("vs_plain", &plain),
+                                   std::make_pair("ps", &ps)})
+                if (FILE *f = fopen((std::string(dir) + "/" + kv.first + ".metal").c_str(), "w")) {
+                    fputs(kv.second->c_str(), f);
+                    fclose(f);
+                }
+    }
     const double fov = 2.0 * 3.14159265358979 * 13000.0 / 65536.0, aspect = 2560.0 / 1440.0, n = 0.5, f = 10000.0;
     const M4 P = proj(fov, aspect, n, f);
     const M4 V = view(1234.5, -356.25, 41.0, 0.7);

@@ -77,6 +77,9 @@ using namespace d9gpu;
 // upscaled scene's sizes are published for the host's menus. Read and written from any thread.
 std::atomic<int> g_upscale_rows{-1};
 std::atomic<uint64_t> g_upscale_in{0}, g_upscale_out{0};
+// v2.5 MetalFX temporal (host_upscale_temporal_*, upscale_control.h): the panel's jitter-sign test switch, and whether
+// the last scene was scaled temporally (1) or fell back to spatial (0); -1 before a scene. Any thread.
+std::atomic<int> g_temporal_flip{0}, g_temporal_active{-1};
 // host_d9_diag_set (upscale_control.h): the iOS panel's reflection test, live, for the flicker at 90/120 fps.
 // 1 holds the car reflection maps (draws and clears into cube faces are skipped, the last contents stay), 2 holds
 // the shadow maps (square depth textures the scene samples), 4 logs those passes, one line a frame for 600 frames.
@@ -434,7 +437,8 @@ struct FndMv {
     float2 size, h;     // render pixels; the unjittered halfpix (NDC)
     float2 jc, jp;      // jitter this frame / the previous frame (render pixels, x right, y down)
     float zn, zf;       // near / far (linear depth for the error)
-    uint flags, pad;    // 1 the previous depth is valid, 2 debug motion, 4 debug reprojection error, 8 TEST counters
+    uint flags, pad;    // 1 the previous depth is valid, 2 debug motion, 4 debug reprojection error, 8 TEST counters,
+                        // 32 v2.5: per-object motion in om (UV units; x >= 30000: none, the camera vector stays)
 };
 // q (32 words): 0 pixels, 1 sky, 2 behind the previous camera, 3/4 sum |mv| lo/hi (1/65536 px), 5 max |mv|,
 // 6..12 reprojected depth error < 0.1 / 0.25 / 0.5 / 1 / 2 / 5 / >= 5 %, 13 disoccluded, 14 off screen, 15 edge,
@@ -450,13 +454,18 @@ static float3 fnd_hue(float a) {
 }
 static void fnd_body(uint2 p, bool in, float d, constant FndMv &u, texture2d<float, access::write> mv,
                      texture2d<float, access::read> pz, texture2d<float, access::write> nz,
-                     texture2d<float, access::write> dbg, device atomic_uint *q) {
+                     texture2d<float, access::write> dbg, device atomic_uint *q, texture2d<float, access::read> om) {
     const float2 ndc = float2(2.0 * (float(p.x) + 0.5) / u.size.x - 1.0 - u.h.x,
                               1.0 - 2.0 * (float(p.y) + 0.5) / u.size.y - u.h.y);
     const bool sky = d >= 1.0;
     const float4 o = float4(ndc, d, 1.0) * (sky ? u.Rsky : u.R);
     const bool front = o.w > 1e-6;
     float2 m = front ? (o.xy / o.w - ndc) * float2(0.5, -0.5) * u.size : float2(0.0);
+    if (in && (u.flags & 32u)) {   // v2.5 MetalFX temporal: the draw's own motion where it wrote one (cars, wheels)
+        const float2 ob = om.read(p).xy;
+        if (ob.x < 30000.0)
+            m = ob * u.size;
+    }
     uint c[17] = {};
     if (in) {
         if (u.flags & 8u)   // the previous depth: only for the counters / debug 8 (CONF14B cost)
@@ -540,14 +549,16 @@ static void fnd_body(uint2 p, bool in, float d, constant FndMv &u, texture2d<flo
 kernel void fnd_motion_cs(depth2d<float, access::read> z [[texture(0)]], texture2d<float, access::write> mv [[texture(1)]],
                           texture2d<float, access::read> pz [[texture(2)]], texture2d<float, access::write> nz [[texture(3)]],
                           texture2d<float, access::write> dbg [[texture(4)]], constant FndMv &u [[buffer(0)]],
-                          device atomic_uint *q [[buffer(1)]], uint2 p [[thread_position_in_grid]]) {
+                          device atomic_uint *q [[buffer(1)]], texture2d<float, access::read> om [[texture(5)]],
+                          uint2 p [[thread_position_in_grid]]) {
     const bool in = p.x < uint(u.size.x) && p.y < uint(u.size.y);
-    fnd_body(p, in, in ? z.read(p) : 1.0, u, mv, pz, nz, dbg, q);
+    fnd_body(p, in, in ? z.read(p) : 1.0, u, mv, pz, nz, dbg, q, om);
 }
 kernel void fnd_motion_ms_cs(depth2d_ms<float, access::read> z [[texture(0)]], texture2d<float, access::write> mv [[texture(1)]],
                              texture2d<float, access::read> pz [[texture(2)]], texture2d<float, access::write> nz [[texture(3)]],
                              texture2d<float, access::write> dbg [[texture(4)]], constant FndMv &u [[buffer(0)]],
-                             device atomic_uint *q [[buffer(1)]], uint2 p [[thread_position_in_grid]]) {
+                             device atomic_uint *q [[buffer(1)]], texture2d<float, access::read> om [[texture(5)]],
+                             uint2 p [[thread_position_in_grid]]) {
     const bool in = p.x < uint(u.size.x) && p.y < uint(u.size.y);
     float d = 1.0;
     if (in) {   // the nearest sample, as the scene compose takes it (flag 16: sample 0 only, the cheaper read)
@@ -555,7 +566,18 @@ kernel void fnd_motion_ms_cs(depth2d_ms<float, access::read> z [[texture(0)]], t
         for (uint k = 1; k < z.get_num_samples() && !(u.flags & 16u); ++k)
             d = min(d, z.read(p, k));
     }
-    fnd_body(p, in, d, u, mv, pz, nz, dbg, q);
+    fnd_body(p, in, d, u, mv, pz, nz, dbg, q, om);
+}
+// v2.5 MetalFX temporal: the scene depth copied into a plain Depth32Float when the scaler will not take the scene's own.
+vertex float4 tmp_z_vs(uint vid [[vertex_id]]) {
+    const float2 t = float2(float((vid << 1) & 2u), float(vid & 2u));
+    return float4(t * 2.0 - 1.0, 0.0, 1.0);
+}
+struct TmpZ { float d [[depth(any)]]; };
+fragment TmpZ tmp_z_fs(float4 pos [[position]], depth2d<float, access::read> z [[texture(0)]]) {
+    TmpZ o;
+    o.d = z.read(uint2(pos.xy));
+    return o;
 }
 )MSL";
 struct FndMv {   // kFndSource FndMv
@@ -2945,6 +2967,11 @@ class Renderer final : public D9Backend {
         MTLPixelFormat df = pass_depth_ ? pass_depth_.pixelFormat : MTLPixelFormatInvalid;
         bool blend = rs[27] != 0;
         uint32_t cw[4] = {rs[168], rs[190], rs[191], rs[192]};
+        // v2.5 MetalFX temporal: in a motion pass every unblended draw writes its motion (colour 1, RG); the rest
+        // leave it (a blended draw shows what is behind it, whose motion is already there).
+        const bool want_motion = pass_motion_ && !blend;
+        if (pass_motion_)
+            cw[1] = want_motion ? 3u : 0u;
         uint64_t bkey =
             blend ? (1ull | (uint64_t)rs[19] << 1 | (uint64_t)rs[20] << 5 | (uint64_t)rs[171] << 9 |
                      (uint64_t)(rs[206] != 0) << 13 | (uint64_t)rs[207] << 14 |
@@ -3128,6 +3155,10 @@ class Renderer final : public D9Backend {
             if (shadowpcf_on_ && !recomp_ab::old(recomp_ab::SHADOWPCF))
                 variant.shadowpcf = 1;
         }
+        if (want_motion) {   // v2.5 MetalFX temporal: both halves (the vertex half finds its own clip rows)
+            variant.motion = 1;
+            vvariant.motion = 1;
+        }
         auto pool_variant = [&](uint32_t form, bool minimal, d9msl::PixelVariant &pv, d9msl::VertexVariant &vv) {
             const uint16_t st = form == 1 ? 3u : 1u;   // the stages the pool form samples
             if (form < 1 || form > 2 || (variant.depth_mask & st) || (variant.cube_mask & st) || pp.major < 2)
@@ -3147,6 +3178,7 @@ class Renderer final : public D9Backend {
             pv.pool = (uint8_t)form;
             vv = d9msl::VertexVariant{};
             vv.pool = (uint8_t)form;
+            vv.motion = pv.motion;   // v2.5 MetalFX temporal: both halves or neither
             vv.pbr = pv.pbrworld || pv.water;   // run 12/13: the pilot's (or water's) vertex half goes with its pixel half
             return true;
         };
@@ -3159,6 +3191,14 @@ class Renderer final : public D9Backend {
             d9msl::VertexVariant pvv;
             if (force != POOL_FORCE_LATE && force != POOL_FORCE_LATEALL && pool_variant(d.pool_fuse, false, pv, pvv))
                 pso = build(pv, pvv, &vfn, &ffn);
+            if (!pso && variant.motion) {   // v2.5 MetalFX temporal: the pool light before the motion
+                ++tmp_.plain;
+                variant.motion = 0;
+                vvariant.motion = 0;
+                cw[1] = 0;
+                if (force != POOL_FORCE_LATE && force != POOL_FORCE_LATEALL && pool_variant(d.pool_fuse, false, pv, pvv))
+                    pso = build(pv, pvv, &vfn, &ffn);
+            }
             if (!pso && variant.pbrworld && force == POOL_FORCE_NONE) {   // run 12: full without the pilot before minimal
                 ++pbw_fallback_;
                 variant.pbrworld = 0;
@@ -3193,6 +3233,13 @@ class Renderer final : public D9Backend {
         if (!pso) {
             defer_ok_ = true;   // run 15 (hitch): the chain below draws a not-yet-compiled variant plain
             pso = build(variant, vvariant, &vfn, &ffn);
+            if ((!vfn || !ffn || !pso) && variant.motion) {   // v2.5 MetalFX temporal: drawn plain (camera motion)
+                ++tmp_.plain;
+                variant.motion = 0;
+                vvariant.motion = 0;
+                cw[1] = 0;
+                pso = build(variant, vvariant, &vfn, &ffn);
+            }
             if ((!vfn || !ffn || !pso) && variant.pbrprobe) {   // run 12 probe (TEST ONLY): never lose the draw
                 ++pbr_fallback_;
                 variant.pbrprobe = 0;
@@ -3397,6 +3444,8 @@ class Renderer final : public D9Backend {
         memcpy(vparams.ascale, ascale, sizeof ascale);
         [enc_ setVertexBytes:&vparams length:sizeof vparams atIndex:17];
         set_constants(true, d.vconst, d.vconst_count, vp);
+        if (vvariant.motion)   // v2.5 MetalFX temporal: this draw's clip rows of the previous scene (vertex buffer 20)
+            tmp_bind(d, vs_key, vp);
         D9PSParams pparams{};
         memcpy(pparams.bconst, d.pbool, sizeof pparams.bconst);
         pparams.alpha_func = rs[15] ? (int32_t)rs[25] : 8;
@@ -3561,6 +3610,10 @@ class Renderer final : public D9Backend {
         if (vdesc_needs_zero_)
             [enc_ setVertexBuffer:zero_ offset:0 atIndex:8];
         const d9trace::Result encoded = encode_primitives(d);
+        if (pass_motion_) {   // v2.5 MetalFX temporal: grass shells and blades draw without motion (the ground's stays)
+            cw[1] = 0;
+            variant.motion = 0;
+        }
         if (grass_.blades_on() && encoded == d9trace::Result::Encoded)   // run 14 grass blades: after the draw, never instead
             grass_blades(d, rs, vs_key, ps_key, vp, pp, bound[0], variant, dkey, stencil, vparams, pparams, build_blade);
         if (grass_.on() && encoded == d9trace::Result::Encoded)   // run 13 grass shells: after the draw, never instead
@@ -5150,7 +5203,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         fprintf(stderr, "[remaster] upscale: MetalFX spatial %s, factor %.2f (%s)%s\n",
                 up_.supported ? "available" : "NOT available: the scene stays native", upscale_factor_,
                 upscale_factor_ <= 1.5f ? "Quality" : "Performance",
-                upscale_temporal_ ? "; temporal asked for but not in this build (v1 spatial)" : "");
+                upscale_temporal_ ? (tmp_on_ ? "; temporal (experimental) on" : "; temporal asked for without the foundation and jitter: spatial") : "");
         return up_.supported;
     }
     static void swap_backing(Tex &t) {
@@ -5258,6 +5311,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         up_.draws = 0;
         up_.in_w = (uint32_t)bt->texture.width;
         up_.in_h = (uint32_t)bt->texture.height;
+        tmp_begin(*bt);
         if (copy_down) {
             upscale_compose(bt->alt_texture, dt ? (dt->alt_drawn ? dt->alt_drawn : dt->alt_texture) : nil, bb, up_.ds);
             return;
@@ -5303,7 +5357,14 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             ++up_.skipped; // nothing drew the scene: the native back buffer is the frame (H1)
             return;
         }
-        id<MTLTexture> out = upscale_encode(scene, bt->texture);
+        id<MTLTexture> out = tmp_.frame ? tmp_encode(scene, scene_z, bt->texture) : nil;
+        if (tmp_.frame) {   // this scene's rows are the next one's previous rows
+            tmp_.prev.swap(tmp_.cur);
+            tmp_.frame = false;
+            g_temporal_active.store(out ? 1 : 0, std::memory_order_relaxed);
+        }
+        if (!out)
+            out = upscale_encode(scene, bt->texture);
         if (!out) {
             ++up_.failures;
             out = scene; // still a picture: the compose pass stretches it bilinearly
@@ -5465,6 +5526,14 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             ++up_.no_end;
             upscale_end(false);
         }
+        if (tmp_on_ && (up_.frames + 1) % 600 == 0)
+            fprintf(stderr,
+                    "[remaster] temporal: scenes %llu scaled %llu spatial %llu resets %llu | motion draws %llu: previous "
+                    "rows %llu, new %llu, no clip rows %llu, drawn plain %llu | jitter sign %+.0f\n",
+                    (unsigned long long)tmp_.scenes, (unsigned long long)tmp_.scaled, (unsigned long long)tmp_.spatial,
+                    (unsigned long long)tmp_.resets, (unsigned long long)tmp_.draws, (unsigned long long)tmp_.known,
+                    (unsigned long long)tmp_.fresh, (unsigned long long)tmp_.noform, (unsigned long long)tmp_.plain,
+                    g_temporal_flip.load(std::memory_order_relaxed) ? -tmp_jsign_ : tmp_jsign_);
         up_.pre_frame = 0;
         up_.begun_frame = false;
         up_.clr_color = up_.clr_depth = up_.clr_stencil = false;
@@ -5477,7 +5546,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     (unsigned long long)up_.frames, (unsigned long long)up_.scaled,
                     (unsigned long long)up_.skipped, upscale_factor_ <= 1.5f ? 1 : 2, up_.in_w, up_.in_h,
                     (unsigned long)up_.sc_ow, (unsigned long)up_.sc_oh, upscale_factor_,
-                    upscale_temporal_ ? "asked, not built (v1 spatial)" : "off",
+                    tmp_on_ ? (tmp_.failed ? "FAILED, spatial" : "on (experimental)") : "off",
                     (unsigned long long)up_.bb_before, (unsigned long long)up_.fitted,
                     (unsigned long long)up_.failures, (unsigned long long)up_.nested,
                     (unsigned long long)up_.refused, (unsigned long long)up_.stray_end,
@@ -5533,6 +5602,212 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 if (Tex *t = tex_ptr(other))
                     if (t->aliased)
                         swap_backing(*t);
+    }
+
+    // ---- v2.5 MetalFX temporal (experimental; state and switches at tmp_) ------------------------------------------
+    // The scene began (its backings are in place): the motion target at the scene's size, and a gap in the scenes
+    // (menus, a load, a cut) starts the history again.
+    void tmp_begin(const Tex &bt) {
+        tmp_.frame = false;
+        if (!tmp_on_ || tmp_.failed || bt.msaa || !bt.texture)
+            return;
+        if (presents_ > tmp_.last_present + 1) {
+            tmp_.reset_next = true;
+            tmp_.prev.clear();
+        }
+        tmp_.last_present = presents_;
+        const NSUInteger w = bt.texture.width, h = bt.texture.height;
+        if (!tmp_.om || tmp_.om.width != w || tmp_.om.height != h) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
+                                                                                          width:w
+                                                                                         height:h
+                                                                                      mipmapped:NO];
+            td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModePrivate;
+            tmp_.om = [mtl_ newTextureWithDescriptor:td];
+            note_alloc(AS_TEXTURE, tmp_.om, w, h, 1, 0);
+            tmp_.reset_next = true;
+            tmp_.prev.clear();
+        }
+        tmp_.frame = tmp_.om != nil;
+        tmp_.cleared = tmp_.wrote = tmp_.motion_ok = false;
+        tmp_.cur.clear();
+        tmp_.occ.clear();
+        ++tmp_.scenes;
+    }
+    // A motion draw: its identity (programs' vertex half, buffers, range and how many draws of the same before it this
+    // scene) finds its clip rows of the last scene; none (a new object, no 4-dp4 oPos): zeros, the camera fills it.
+    void tmp_bind(const HostD9Draw &d, uint64_t vs_key, const d9sh::Program &vp) {
+        ++tmp_.draws;
+        auto it = tmp_.clip.find(vs_key);
+        if (it == tmp_.clip.end()) {
+            uint32_t c = 0;
+            it = tmp_.clip.emplace(vs_key, d9msl::vertex_clip_regs(vp, &c) && c < 252 ? (int32_t)c : -1).first;
+        }
+        TmpRows rows{};
+        if (it->second >= 0 && d.vconst && (uint32_t)it->second + 4 <= d.vconst_count) {
+            uint64_t id = mix(vs_key, (uint64_t)d.stream[0].buffer << 32 | d.stream[0].offset);
+            id = mix(id, (uint64_t)d.index_buffer << 32 | d.start);
+            id = mix(id, (uint64_t)(uint32_t)d.base_vertex << 32 | d.primitive_count);
+            id = mix(id, (uint64_t)d.primitive << 32 | (d.stream[0].buffer ? 0u : d.inline_bytes));
+            id = mix(id, tmp_.occ[id]++);
+            TmpRows now;
+            memcpy(now.r, d.vconst + 4 * it->second, sizeof now.r);
+            auto pv = tmp_.prev.find(id);
+            if (pv != tmp_.prev.end()) {
+                rows = pv->second;
+                ++tmp_.known;
+            } else {
+                ++tmp_.fresh;
+            }
+            tmp_.cur[id] = now;
+        } else {
+            ++tmp_.noform;
+        }
+        [enc_ setVertexBytes:rows.r length:sizeof rows.r atIndex:20];
+    }
+    // The scene depth as a plain Depth32Float (only when the scaler would not take the scene's own format).
+    id<MTLTexture> tmp_zcopy(id<MTLTexture> z) {
+        if (!fnd_library())
+            return nil;
+        if (!tmp_.z32 || tmp_.z32.width != z.width || tmp_.z32.height != z.height) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                          width:z.width
+                                                                                         height:z.height
+                                                                                      mipmapped:NO];
+            td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModePrivate;
+            tmp_.z32 = [mtl_ newTextureWithDescriptor:td];
+            note_alloc(AS_TEXTURE, tmp_.z32, z.width, z.height, 1, 0);
+        }
+        if (!tmp_.zpso) {
+            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+            pd.vertexFunction = [fnd_.lib newFunctionWithName:@"tmp_z_vs"];
+            pd.fragmentFunction = [fnd_.lib newFunctionWithName:@"tmp_z_fs"];
+            pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+            NSError *error = nil;
+            tmp_.zpso = [mtl_ newRenderPipelineStateWithDescriptor:pd error:&error];
+            MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+            dd.depthCompareFunction = MTLCompareFunctionAlways;
+            dd.depthWriteEnabled = YES;
+            tmp_.zdss = [mtl_ newDepthStencilStateWithDescriptor:dd];
+            if (!tmp_.zpso)
+                fprintf(stderr, "[remaster] temporal: depth copy pipeline FAILED: %s\n",
+                        error ? error.localizedDescription.UTF8String : "?");
+        }
+        if (!tmp_.z32 || !tmp_.zpso)
+            return nil;
+        end_pass();
+        begin_frame();
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.depthAttachment.texture = tmp_.z32;
+        rp.depthAttachment.loadAction = MTLLoadActionDontCare;
+        rp.depthAttachment.storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [cmd_ renderCommandEncoderWithDescriptor:rp];
+        if (!e)
+            return nil;
+        [e setRenderPipelineState:tmp_.zpso];
+        [e setDepthStencilState:tmp_.zdss];
+        [e setFragmentTexture:z atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        return tmp_.z32;
+    }
+    // MTLFXTemporalScaler: scene (+ depth, the foundation's vectors, the jitter) -> a private output at the native
+    // size. Nil (that frame scaled spatially, the history reset) when a part is missing; a scaler MetalFX will not
+    // make turns temporal off for the run.
+    id<MTLTexture> tmp_encode(id<MTLTexture> scene, id<MTLTexture> z, id<MTLTexture> native) {
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            id<MTLTexture> mv = fnd_.motion_tex;
+            if (!tmp_.motion_ok || !mv || !z || z.textureType != MTLTextureType2D || z.width != scene.width ||
+                z.height != scene.height || mv.width != scene.width || mv.height != scene.height) {
+                ++tmp_.spatial;
+                tmp_.reset_next = true;
+                return nil;
+            }
+            const NSUInteger iw = scene.width, ih = scene.height, ow = native.width, oh = native.height;
+            if (!tmp_.scaler || tmp_.iw != iw || tmp_.ih != ih || tmp_.ow != ow || tmp_.oh != oh ||
+                tmp_.cf != scene.pixelFormat || tmp_.df != z.pixelFormat) {
+                tmp_.scaler = nil;
+                tmp_.out = nil;
+                tmp_.iw = iw, tmp_.ih = ih, tmp_.ow = ow, tmp_.oh = oh, tmp_.cf = scene.pixelFormat, tmp_.df = z.pixelFormat;
+                for (int attempt = 0; attempt < 2 && !tmp_.scaler; ++attempt) {
+                    MTLFXTemporalScalerDescriptor *td = [MTLFXTemporalScalerDescriptor new];
+                    td.inputWidth = iw;
+                    td.inputHeight = ih;
+                    td.outputWidth = ow;
+                    td.outputHeight = oh;
+                    td.colorTextureFormat = scene.pixelFormat;
+                    td.depthTextureFormat = attempt ? MTLPixelFormatDepth32Float : z.pixelFormat;
+                    td.motionTextureFormat = MTLPixelFormatRG16Float;
+                    td.outputTextureFormat = scene.pixelFormat;
+                    td.autoExposureEnabled = NO;
+                    tmp_.scaler = [td newTemporalScalerWithDevice:mtl_];
+                    tmp_.zcopy = attempt == 1;
+                }
+                id<MTLFXTemporalScaler> sc = tmp_.scaler;
+                if (sc) {
+                    MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:scene.pixelFormat
+                                                                                                  width:ow
+                                                                                                 height:oh
+                                                                                              mipmapped:NO];
+                    od.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead;
+                    od.storageMode = MTLStorageModePrivate;
+                    tmp_.out = [mtl_ newTextureWithDescriptor:od];
+                    note_alloc(AS_TEXTURE, tmp_.out, ow, oh, 1, 0);
+                }
+                fprintf(stderr, "[remaster] temporal: scaler %lux%lu -> %lux%lu colour %lu depth %lu%s %s\n",
+                        (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh,
+                        (unsigned long)scene.pixelFormat, (unsigned long)z.pixelFormat,
+                        tmp_.zcopy ? " (copied to Depth32Float)" : "",
+                        tmp_.scaler && tmp_.out ? "ready" : "FAILED: spatial for the rest of the run");
+                if (!tmp_.scaler || !tmp_.out) {
+                    tmp_.failed = true;
+                    tmp_.scaler = nil;
+                    return nil;
+                }
+                tmp_.reset_next = true;
+            }
+            id<MTLFXTemporalScaler> sc = tmp_.scaler;
+            id<MTLTexture> zt = tmp_.zcopy ? tmp_zcopy(z) : z;
+            if (!zt || (scene.usage & sc.colorTextureUsage) != sc.colorTextureUsage ||
+                (zt.usage & sc.depthTextureUsage) != sc.depthTextureUsage ||
+                (mv.usage & sc.motionTextureUsage) != sc.motionTextureUsage) {
+                if (!tmp_.warned) {
+                    tmp_.warned = true;
+                    fprintf(stderr, "[remaster] temporal: an input lacks the usage the scaler asks for (colour %d depth %d "
+                                    "motion %d): spatial\n",
+                            (int)((scene.usage & sc.colorTextureUsage) == sc.colorTextureUsage),
+                            (int)(zt && (zt.usage & sc.depthTextureUsage) == sc.depthTextureUsage),
+                            (int)((mv.usage & sc.motionTextureUsage) == sc.motionTextureUsage));
+                }
+                ++tmp_.spatial;
+                tmp_.reset_next = true;
+                return nil;
+            }
+            end_pass();
+            begin_frame();
+            sc.colorTexture = scene;
+            sc.depthTexture = zt;
+            sc.motionTexture = mv;
+            sc.outputTexture = tmp_.out;
+            sc.inputContentWidth = iw;
+            sc.inputContentHeight = ih;
+            const float sign = g_temporal_flip.load(std::memory_order_relaxed) ? -tmp_jsign_ : tmp_jsign_;
+            sc.jitterOffsetX = sign * (float)fnd_.jx;
+            sc.jitterOffsetY = sign * (float)fnd_.jy;
+            sc.motionVectorScaleX = 1.0f;
+            sc.motionVectorScaleY = 1.0f;
+            sc.depthReversed = NO;
+            const bool reset = tmp_.reset_next || fnd_.reset != 0;
+            sc.reset = reset;
+            tmp_.resets += reset;
+            tmp_.reset_next = false;
+            [sc encodeToCommandBuffer:cmd_];
+            ++tmp_.scaled;
+            return tmp_.out;
+        }
+        return nil;
     }
 
     // ---- Remaster run 14 foundation F1-F3 (review/run14/foundation-design.md; state and envs at fnd_) -------------
@@ -5600,8 +5875,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // F3 jitter: only for draws into the scene back buffer inside the window (shadow, mirror, reflections, car env,
     // front end and the post chain never get it). One render pixel is 2 / (viewport x pass scale) in NDC.
     void fnd_halfpix(const HostD9Draw &d, float *halfpix) {
-        if (!fnd_jitter_ || !pass_color_id_ || pass_color_id_ != fnd_.bb)
-            return;
+        if (!fnd_jitter_ || !pass_color_id_ || pass_color_id_ != fnd_.bb || (tmp_on_ && tmp_.failed))
+            return;   // v2.5: no jitter once temporal fell back to spatial for the run (it would shimmer)
         float dx, dy;
         remaster_fnd::jitter_halfpix(fnd_.jx, fnd_.jy, d.viewport[2] * (double)pass_scale_, d.viewport[3] * (double)pass_scale_,
                                      &dx, &dy);
@@ -5795,6 +6070,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     }
     // The scene back buffer or depth is redefined or dropped: the window closes without vectors, the history resets.
     void fnd_drop() {
+        tmp_.reset_next = true;   // v2.5 MetalFX temporal: no history across a reset / resize
+        tmp_.prev.clear();
         fnd_.open = false;
         fnd_.resized = true;
         fnd_.prev_valid = fnd_.prevz_valid = false;
@@ -5873,6 +6150,9 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         u.zf = pf > u.zn ? (float)pf : fnd_.cam.have && fnd_.cam.far > u.zn ? (float)fnd_.cam.far : 15000.0f;
         u.flags = (measure && fnd_.prevz_valid ? 1u : 0u) | (fnd_debug_ == 6 ? 2u : 0u) | (fnd_debug_ == 8 ? 4u : 0u) |
                   (measure ? 8u : 0u) | 16u;   // 16: MSAA depth sample 0 (COMB14B cost: 0.19 vs 0.30 ms at 4K 4x)
+        const bool om = tmp_.frame && tmp_.wrote && tmp_.om && tmp_.om.width == w && tmp_.om.height == h;
+        if (om)
+            u.flags |= 32u;   // v2.5 MetalFX temporal: the draws' own motion where they wrote it
         const int si = (int)(fnd_.frames & 7);
         FndSlot &sl = fnd_.slot[si];
         const bool count = measure && !sl.pending;   // a slot still in flight: this frame goes uncounted
@@ -5888,6 +6168,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         [ce setTexture:dbg ? fnd_.dbg : fnd_.motion_tex atIndex:4];
         [ce setBytes:&u length:sizeof u atIndex:0];
         [ce setBuffer:fnd_.q offset:(NSUInteger)(count ? si : 8) * 32 * 4 atIndex:1];
+        [ce setTexture:om ? tmp_.om : nil atIndex:5];
         [ce dispatchThreadgroups:MTLSizeMake((w + 15) / 16, (h + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         [ce endEncoding];
         if (count) {
@@ -5898,6 +6179,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         fnd_.prevz_i ^= 1;
         fnd_.prevz_valid = measure;
         ++fnd_.motion;
+        tmp_.motion_ok = true;
         if (dbg)
             fnd_debug_view();
     }
@@ -6090,6 +6372,20 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         }
         if (!pass_samples_)
             pass_samples_ = 1;
+        // v2.5 MetalFX temporal: a pass on the scene back buffer gets the motion target as colour 1 (cleared to
+        // "no motion" at the scene's first pass and with any whole clear of the frame; loaded after).
+        pass_motion_ = false;
+        if (tmp_.frame && up_.open && t.color[0].id == up_.bb && !t.color[1].id && t.color[0].level == 0 &&
+            pass_samples_ == 1 && pass_color_[0] && tmp_.om && tmp_.om.width == pass_color_[0].width &&
+            tmp_.om.height == pass_color_[0].height) {
+            rp.colorAttachments[1].texture = tmp_.om;
+            rp.colorAttachments[1].loadAction = tmp_.cleared && !clear_color ? MTLLoadActionLoad : MTLLoadActionClear;
+            rp.colorAttachments[1].clearColor = MTLClearColorMake(60000.0, 0.0, 0.0, 0.0);
+            rp.colorAttachments[1].storeAction = MTLStoreActionStore;
+            pass_color_[1] = tmp_.om;
+            tmp_.cleared = tmp_.wrote = true;
+            pass_motion_ = true;
+        }
         pass_color_id_ = pass_color_[0] ? t.color[0].id : 0; // Test86
         pass_depth_ = nil;
         Tex *dt = t.depth.id ? tex_ptr(t.depth.id) : nullptr;
@@ -6452,12 +6748,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // (each listed field has a fallback there that drops it). Pools, grass and the rest never defer.
     static bool pixel_deferrable(const d9msl::PixelVariant &v) {
         return (v.smoke || v.parallax || v.glass || v.sky || v.fefloor || v.roadsheen || v.water || v.pbrworld ||
-                v.pbrprobe) &&
+                v.pbrprobe || v.motion) &&
                !v.pool && !v.grass && !v.grass_blade && !v.carpaint;
     }
     static bool vertex_deferrable(const d9msl::PixelVariant &v, const d9msl::VertexVariant &vv) {
         return ((vv.smoke && v.smoke) || (vv.glass && v.glass) || vv.sky || vv.carenv || (vv.fefloor && v.fefloor) ||
-                (vv.pbr && (v.water || v.pbrworld))) &&
+                (vv.pbr && (v.water || v.pbrworld)) || vv.motion) &&
                !vv.pool && !vv.grass && !vv.grass_blade;
     }
     id<MTLFunction> function(uint64_t code_key, const d9sh::Program &p,
@@ -7158,6 +7454,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     float pass_scale_ = 1.0f;
     uint32_t pass_samples_ = 1; // sample count of the open pass's attachments
     bool pass_fitted_depth_ = false;
+    bool pass_motion_ = false;   // v2.5 MetalFX temporal: colour 1 of this pass is tmp_.om
     // Test155 allocation watch (see note_alloc / alloc_watch).
     AllocStat alloc_[AS_COUNT];
     uint64_t alloc_base_ = 0, alloc_lines_ = 0, alloc_big_ = 0;
@@ -7268,6 +7565,32 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         return (f >= 1.1 && f <= 3.0) ? (float)f : 0.0f;
     }();
     const bool upscale_temporal_ = [] { const char *e = getenv("RECOMP_REMASTER_UPSCALE_TEMPORAL"); return e && *e == '1'; }();
+    // v2.5 MetalFX temporal (experimental; the iOS panel's Upscaler "Temporal" sets RECOMP_REMASTER_UPSCALE_TEMPORAL,
+    // the foundation and its jitter at launch). Each unblended scene draw also writes its own motion (the motion shader
+    // variants: the same vertex through its clip rows of the previous frame, matched by draw identity) into `om`; the
+    // foundation's camera pass fills every other pixel from the depth; MTLFXTemporalScaler then takes the scene, its
+    // depth, those vectors and the jitter. Anything missing on a frame: that frame is scaled spatially, history reset.
+    const bool tmp_on_ = upscale_temporal_ && fnd_on_ && fnd_jitter_ == 1;
+    // MetalFX's jitter is the sample offset: the geometry moved by (jx, jy) pixels samples at minus that. 1 flips it.
+    const float tmp_jsign_ = [] { const char *e = getenv("RECOMP_TEMPORAL_JITTER_SIGN"); return e && *e == '1' ? 1.0f : -1.0f; }();
+    struct TmpRows {
+        float r[16];
+    };
+    struct {
+        bool frame = false, cleared = false, wrote = false, motion_ok = false, reset_next = true, failed = false;
+        bool zcopy = false, warned = false;
+        id<MTLTexture> om = nil, z32 = nil, out = nil;
+        id scaler = nil;   // id<MTLFXTemporalScaler>
+        id<MTLRenderPipelineState> zpso = nil;
+        id<MTLDepthStencilState> zdss = nil;
+        NSUInteger iw = 0, ih = 0, ow = 0, oh = 0;
+        MTLPixelFormat cf = MTLPixelFormatInvalid, df = MTLPixelFormatInvalid;
+        std::unordered_map<uint64_t, TmpRows> cur, prev;   // draw identity -> its clip rows (this / the last scene)
+        std::unordered_map<uint64_t, uint32_t> occ;        // identity -> draws so far this scene (repeats of one mesh)
+        std::unordered_map<uint64_t, int32_t> clip;        // vs key -> clip register (-1: no 4-dp4 oPos)
+        uint64_t last_present = 0;
+        uint64_t scenes = 0, scaled = 0, spatial = 0, resets = 0, draws = 0, known = 0, fresh = 0, noform = 0, plain = 0;
+    } tmp_;
     struct {
         bool checked = false, supported = false;
         bool open = false, begun_frame = false;
@@ -7628,6 +7951,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
 
 } // namespace
 
+extern "C" void host_upscale_temporal_flip_jitter(int flip) {
+    g_temporal_flip.store(flip ? 1 : 0, std::memory_order_relaxed);
+}
+extern "C" int host_upscale_temporal_active(void) {
+    return g_temporal_active.load(std::memory_order_relaxed);
+}
 extern "C" void host_upscale_set_rows(int rows) {
     const int before = g_upscale_rows.exchange(rows < 0 ? -1 : rows);
     if (before != (rows < 0 ? -1 : rows))

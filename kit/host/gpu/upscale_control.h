@@ -24,6 +24,12 @@ void host_upscale_set_rows(int rows);
 // physical pixels; 0 before one has (or while the scene draws native).
 void host_upscale_last_sizes(int *in_w, int *in_h, int *out_w, int *out_h);
 
+// v2.5 MetalFX temporal (experimental; on from launch with RECOMP_REMASTER_UPSCALE_TEMPORAL=1 and the foundation):
+// 1 if the last scene was scaled temporally, 0 if it fell back to spatial, -1 before one (or temporal off).
+int host_upscale_temporal_active(void);
+// The panel's test switch: 1 flips the jitter sign MetalFX is given (a wrong sign shimmers on still edges).
+void host_upscale_temporal_flip_jitter(int flip);
+
 // The iOS panel's reflection test (Metal renderer, live): 1 holds the car
 // reflection maps, 2 holds the shadow maps, 4 logs their passes for 600 frames,
 // 8 captures the next 12 frames (pictures and draw lists) into Documents/Logs.

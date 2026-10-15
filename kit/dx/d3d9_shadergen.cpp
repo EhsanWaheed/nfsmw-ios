@@ -1018,6 +1018,54 @@ bool vertex_clip_regs(const Program &p, uint32_t *clip) {
     *clip = (uint32_t)a;
     return true;
 }
+// v2.5 MetalFX temporal: the motion varyings, added to D9V2F in both halves of a motion pair only.
+static bool motion_varyings(std::string *s) {
+    static const char kEnd[] = "    float fogz;\n";
+    const size_t at = s->find(kEnd);
+    if (at == std::string::npos || s->find("float4 mv_c;") != std::string::npos)
+        return false;
+    s->insert(at + strlen(kEnd), "    float4 mv_c; float4 mv_p;\n");
+    return true;
+}
+// mv_c = opos before the fixups; mv_p = the oPos input through the previous rows at buffer(20) (zero without the form).
+static bool motion_vs_patch(std::string *s) {
+    static const char kOut[] = "    D9V2F o;\n    o.pos = opos;\n";
+    static const char kP[] = "constant D9VSParams &P [[buffer(17)]]";
+    std::map<std::string, FefRows> w;
+    int in = -1;
+    if (fef_parse_rows(*s, &w)) {
+        const auto o = w.find("opos");
+        if (o != w.end() && fef_rows(o->second) >= 0)
+            in = o->second.in;
+    }
+    const size_t b = s->find(kOut), p = s->find(kP);
+    if (b == std::string::npos || p == std::string::npos || s->find(kOut, b + 1) != std::string::npos ||
+        s->find("buffer(20)") != std::string::npos)
+        return false;
+    const std::string v = "vv[" + std::to_string(in) + "]";
+    s->insert(b + strlen(kOut),
+              in >= 0 ? "    o.mv_c = opos;\n    o.mv_p = float4(dot(" + v + ", mvp[0]), dot(" + v + ", mvp[1]), dot(" + v +
+                            ", mvp[2]), dot(" + v + ", mvp[3]));\n"
+                      : std::string("    o.mv_c = opos;\n    o.mv_p = float4(0.0);\n"));
+    s->insert(p + strlen(kP), ",\n                     constant float4 *mvp [[buffer(20)]]");
+    return motion_varyings(s);
+}
+// colour 1 = (previous - current) in UV units (x right, y down), or x = 60000 (no previous position: the camera pass).
+static bool motion_ps_patch(std::string *s) {
+    static const char kC0[] = "    float4 c0 [[color(0)]];\n";
+    static const char kRet[] = "    return o;\n}\n";
+    const size_t c0 = s->find(kC0), r = s->rfind(kRet);
+    if (c0 == std::string::npos || r == std::string::npos || r < c0 || s->find("[[color(1)]]") != std::string::npos)
+        return false;
+    s->insert(r, "    {   // v2.5 MetalFX temporal: this pixel's motion\n"
+                 "        const float4 mc = vin.mv_c, mp = vin.mv_p;\n"
+                 "        o.mv = mp.w > 1.0e-6 && mc.w > 1.0e-6\n"
+                 "                   ? float4((mp.xy / mp.w - mc.xy / mc.w) * float2(0.5, -0.5), 0.0, 0.0)\n"
+                 "                   : float4(60000.0, 0.0, 0.0, 0.0);\n"
+                 "    }\n");
+    s->insert(c0 + strlen(kC0), "    float4 mv [[color(1)]];\n");
+    return motion_varyings(s);
+}
 // t7 = Mclip x opos (the D3D clip position before the half-pixel fixup); Mclip rows at buffer(18).
 static bool fefloor_vs_patch(std::string *s) {
     static const char kSig[] = "                     constant D9VSParams &P [[buffer(17)]]) {\n";
@@ -1576,6 +1624,11 @@ bool vertex_source(const Program &p, const VertexVariant &vv, std::string *out, 
                 *why = "grass blade: no POSITION0/NORMAL0/TEXCOORD0 input, the slot is written or the anchors differ";
             return false;
         }
+    }
+    if (vv.motion && (vv.grass_blade || !motion_vs_patch(&s))) {   // v2.5 MetalFX temporal: drawn plain (camera motion)
+        if (why)
+            *why = "motion: the output lines are not as expected";
+        return false;
     }
     *out = s;
     return true;
@@ -3106,6 +3159,11 @@ bool pixel_source(const Program &p, const PixelVariant &v, std::string *out, std
     if (v.hdr && !hdr_epilogue(&s, v.hdr)) {   // item 10: never "drawn to the float frame unclamped"
         if (why)
             *why = "hdr: the output lines are not as expected";
+        return false;
+    }
+    if (v.motion && !motion_ps_patch(&s)) {   // v2.5 MetalFX temporal: drawn plain (camera motion)
+        if (why)
+            *why = "motion: more than colour 0 or the output lines are not as expected";
         return false;
     }
     *out = s;

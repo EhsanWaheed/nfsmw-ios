@@ -34,6 +34,7 @@ NSString *const kEffects = @"ios.effectsInternal";   // TEST: glow/DoF/blur befo
 NSString *const kSim120 = @"ios.simulation120";      // retired: a 120 Hz simulation crashed races; forced off
 NSString *const kSeeded = @"ios.seededDetail";       // the first-run Detail level was set (once per install)
 NSString *const kMaxPerf = @"ios.maxPerformance";     // Max performance mode (next launch)
+NSString *const kTemporal = @"ios.upscalerTemporal";  // v2.5: MetalFX temporal instead of spatial (next launch)
 NSString *const kMaxPerfSaved = @"ios.maxPerfSaved";  // the player's own values, put back when the mode goes off
 
 // The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp), looked up by key each
@@ -272,6 +273,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UISwitch *maxPerf;
 @property(nonatomic) NSArray<UISwitch *> *diag; // the reflection test: tag = its host_d9_diag_set bit, never saved
 @property(nonatomic) UIStackView *diagView;      // the Diagnostics tab
+@property(nonatomic) UISegmentedControl *upscaler; // v2.5: Spatial / Temporal (experimental), next launch
 @property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
@@ -661,6 +663,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.dynamic = [self switchFor:kDynamic action:@selector(dynamicChanged:)];
     self.effects = [self switchFor:kEffects action:@selector(effectsChanged:)];
     self.status = [self note:@""];
+    self.upscaler = [[UISegmentedControl alloc] initWithItems:@[ @"Spatial", @"Temporal (experimental)" ]];
+    self.upscaler.selectedSegmentIndex = [defaults() boolForKey:kTemporal] ? 1 : 0;
+    [self.upscaler addTarget:self action:@selector(upscalerChanged:) forControlEvents:UIControlEventValueChanged];
 
     NSMutableArray *outputTitles = [NSMutableArray array];
     NSInteger outputIndex = (NSInteger)_outputs.size() - 1;
@@ -743,6 +748,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                     @"above 5/6 of the output draws at 5/6 (upscaling that little leaves fine lines)."
               style:UIFontTextStyleSubheadline],
         self.resolution,
+        [self label:@"Upscaler (next launch): Spatial sharpens each frame on its own. Temporal (experimental) builds "
+                    @"detail over several frames from each object's motion: smoother edges and finer detail, but "
+                    @"new and may smear or shimmer in places. Restart the game to switch."
+              style:UIFontTextStyleSubheadline],
+        self.upscaler,
         [self row:@"Frame cap (fps)" control:self.frameCap],
         [self rowWithTitle:[self label:@"Dynamic resolution" style:UIFontTextStyleBody]
                     detail:[self note:@"Steps the 3D scene down as the device heats up (fair: one step, serious: "
@@ -758,6 +768,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         hint,
     ];
     self.diagView = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self section:@"Temporal test"],
+        [self rowWithTitle:[self label:@"Flip temporal jitter" style:UIFontTextStyleBody]
+                    detail:[self note:@"With the Temporal upscaler: if still edges (poles, signs, the HUD-free road) "
+                                      @"shimmer or wobble, try this. Live; tell me which looked steadier."]
+                   control:[self switchWithAction:@selector(temporalFlipChanged:)]],
         [self section:@"Reflection test"],
         [self note:@"For the car flicker in rain above 60 fps (a 60 fps cap avoids it). Live, and off again at "
                    @"every launch."],
@@ -781,7 +796,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     host_upscale_last_sizes(&iw, &ih, &ow, &oh);
     static const char *const thermal[] = {"nominal", "fair", "serious", "critical"};
     const NSInteger t = std::clamp<NSInteger>(NSProcessInfo.processInfo.thermalState, 0, 3);
-    NSString *scene = iw ? [NSString stringWithFormat:@"3D scene %d×%d → %d×%d (MetalFX)", iw, ih, ow, oh]
+    const int ta = host_upscale_temporal_active();
+    NSString *kind = ta == 1 ? @"MetalFX temporal" : ta == 0 ? @"MetalFX spatial: temporal fell back" : @"MetalFX";
+    NSString *scene = iw ? [NSString stringWithFormat:@"3D scene %d×%d → %d×%d (%@)", iw, ih, ow, oh, kind]
                          : _appliedRows == 0 ? @"3D scene at native resolution (MetalFX off)"
                                              : @"3D scene: not upscaled yet (starts with the next 3D frame)";
     NSString *stepped = _appliedRows != [self userRows]
@@ -1252,6 +1269,22 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [self applyResolution];
     [self refreshStatus];
 }
+- (UISwitch *)switchWithAction:(SEL)action {
+    UISwitch *sw = [UISwitch new];
+    [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+    return sw;
+}
+// One upscaler at a time (the segments): the choice is saved and takes effect at the next launch.
+- (void)upscalerChanged:(UISegmentedControl *)c {
+    const BOOL temporal = c.selectedSegmentIndex == 1;
+    [defaults() setBool:temporal forKey:kTemporal];
+    fprintf(stderr, "[ios] overlay: upscaler %s (restart to apply)\n", temporal ? "temporal" : "spatial");
+    [self showRestartNoticeTitle:temporal ? @"Temporal upscaler is on" : @"Spatial upscaler is on"
+                            icon:temporal ? @"sparkles" : @"arrow.counterclockwise.circle.fill"];
+}
+- (void)temporalFlipChanged:(UISwitch *)s {
+    host_upscale_temporal_flip_jitter(s.on ? 1 : 0);
+}
 - (void)effectsChanged:(UISwitch *)s {
     [defaults() setBool:s.on forKey:kEffects];
 }
@@ -1289,6 +1322,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 
 // A Liquid Glass card in the middle of the screen: the mode's settings take full effect after a restart.
 - (void)showRestartNotice:(BOOL)on {
+    [self showRestartNoticeTitle:on ? @"Max performance is on" : @"Max performance is off"
+                            icon:on ? @"bolt.circle.fill" : @"arrow.counterclockwise.circle.fill"];
+}
+- (void)showRestartNoticeTitle:(NSString *)text icon:(NSString *)symbol {
     [self.notice removeFromSuperview];
     UIView *dim = [[UIView alloc] initWithFrame:self.window.bounds];
     dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -1303,11 +1340,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         card.clipsToBounds = YES;
     }
     UIImageView *icon = [[UIImageView alloc]
-        initWithImage:[UIImage systemImageNamed:on ? @"bolt.circle.fill" : @"arrow.counterclockwise.circle.fill"]];
+        initWithImage:[UIImage systemImageNamed:symbol]];
     icon.tintColor = UIColor.systemOrangeColor;
     icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:44];
     icon.contentMode = UIViewContentModeScaleAspectFit;
-    UILabel *title = [self label:on ? @"Max performance is on" : @"Max performance is off" style:UIFontTextStyleTitle2];
+    UILabel *title = [self label:text style:UIFontTextStyleTitle2];
     title.textAlignment = NSTextAlignmentCenter;
     UILabel *body = [self label:@"Restart the game so every setting applies: close it and open it again."
                           style:UIFontTextStyleBody];
@@ -1359,7 +1396,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (void)closeForRestart {
     mods_settings_save();
     [defaults() synchronize];
-    fprintf(stderr, "[ios] overlay: closing for a restart (max performance)\n");
+    fprintf(stderr, "[ios] overlay: closing for a restart\n");
     exit(0);
 }
 
@@ -1564,10 +1601,18 @@ void ios_overlay_apply_launch_settings() {
     // polling (kit/host/sdl/main.cpp service), so the CPU idles while it waits for the next frame.
     if ([d boolForKey:kMaxPerf])
         setenv("RECOMP_IOS_LOW_POWER", "1", 1);
+    // v2.5 MetalFX temporal (experimental): the scaler, and the foundation it needs (the camera, the motion pass and
+    // the Halton jitter on the scene's draws). Read once by the renderer and the core mod as they start.
+    if ([d boolForKey:kTemporal]) {
+        setenv("RECOMP_REMASTER_UPSCALE_TEMPORAL", "1", 1);
+        setenv("RECOMP_REMASTER_FOUNDATION", "1", 1);
+        setenv("RECOMP_REMASTER_FOUNDATION_JITTER", "1", 1);
+    }
     // The 120 Hz simulation test crashed races (SIGSEGV at the start, 12 Oct): off, whatever was saved.
     [d removeObjectForKey:kSim120];
-    fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s\n",
-            g_launch_output > 0 ? "" : "the screen's, ", g_launch_output, [d boolForKey:kEffects] ? "ON (test)" : "off");
+    fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s, upscaler %s\n",
+            g_launch_output > 0 ? "" : "the screen's, ", g_launch_output, [d boolForKey:kEffects] ? "ON (test)" : "off",
+            [d boolForKey:kTemporal] ? "temporal (experimental)" : "spatial");
 }
 
 void ios_overlay_install(SDL_Window *window) {
