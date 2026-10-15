@@ -10,7 +10,9 @@ class FrameDeadline {
 
   public:
     void begin(int rate, int64_t now_ns) {
-        if (rate != 40 && rate != 60 && rate != 120) {
+        // Any cap from 20 to 240 (the iOS panel also asks for 30 and 80; those were left unpaced here
+        // before, so only the display held the game back and it ran over the cap).
+        if (rate < 20 || rate > 240) {
             rate_ = 0;
             deadline_ = 0;
             return;

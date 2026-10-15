@@ -351,6 +351,9 @@ SDL_Window *platform_ui_create_window(const char *title, int, int, int, int,
     return w;
 }
 
+// Set by a real trip to the background (not a Control Centre pull, which only resigns active).
+static bool g_was_backgrounded = false;
+
 bool platform_ui_handle_lifecycle(const SDL_Event &e) {
     switch (e.type) {
     case SDL_EVENT_WILL_ENTER_BACKGROUND:
@@ -360,6 +363,7 @@ bool platform_ui_handle_lifecycle(const SDL_Event &e) {
         return true;
     case SDL_EVENT_DID_ENTER_BACKGROUND:
         fprintf(stderr, "[ios] did enter background\n");
+        g_was_backgrounded = true;
         host_present_suspend(true);
         host_audio_pause(true);
         return true;
@@ -369,6 +373,12 @@ bool platform_ui_handle_lifecycle(const SDL_Event &e) {
     case SDL_EVENT_DID_ENTER_FOREGROUND:
         fprintf(stderr, "[ios] did enter foreground: resuming audio and presentation\n");
         host_audio_pause(false);
+        // A screen lock stops the system's audio output under us and does not hand it back, so the game came back
+        // silent (going to the home screen and back fixed it). Reopen the output after any real background.
+        if (g_was_backgrounded) {
+            g_was_backgrounded = false;
+            host_audio_restart_output("back from the background");
+        }
         host_present_suspend(false);
         return true;
     case SDL_EVENT_TERMINATING:
