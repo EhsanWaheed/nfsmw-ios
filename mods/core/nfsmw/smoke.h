@@ -76,13 +76,14 @@ static const uint32_t k_smoke_keys[] = {
 };
 /* run 15: Stuff Pack smoke, the emitters its data adds per group (appended after the group's own; smoke_kinds.h
  * classes 6da6dd9d / 00b4e4ef / e00557c4 / dd458eb9 as tyre smoke for lit smoke) */
-#define SMOKE_GRP_N   4
+/* 15 Oct (owner's iPhone, fresh profile): fxtd_sl_asphalt (7790c105: 1 emitter, +4 here) crashed the game at the
+ * countdown of a race (SIGSEGV in guest thread 1, EIP 0081bce0, right after "group 7790c105 on (emitters 1 -> 5)"),
+ * every time; it is left as the game has it. The other three groups were in every working run. */
+#define SMOKE_GRP_N   3
 #define SMOKE_ADD_MAX 4
 static const struct { uint32_t group, n, add[SMOKE_ADD_MAX]; } k_smoke_groups[SMOKE_GRP_N] = {
     {0xeaa2e866u, 2, {0x6da6dd9du, 0x00b4e4efu}},               /* fxtd_sk_asphalt + extrasmoke1, asphaltsmokedark1 */
     {0xd2f8d5bau, 2, {0x00b4e4efu, 0x6da6dd9du}},               /* fxtd_sk_asphalt_no_leaves + the same two */
-    {0x7790c105u, 4, {0xe00557c4u, 0x6a64a678u, 0x6da6dd9du, 0x00b4e4efu}}, /* fxtd_sl_asphalt + sk_asphaltfastsmk1,
-                                                                   dr_leaves, extrasmoke1, asphaltsmokedark1 */
     {0x95cde6cbu, 1, {0xdd458eb9u}},                            /* fxtd_dr_asphalt_leaves + dr_asphalt_smk */
 };
 typedef struct {
