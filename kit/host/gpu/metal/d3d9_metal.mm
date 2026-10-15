@@ -399,19 +399,23 @@ fragment float4 depth_copy_ms_fs(QuadOut i [[stage_in]], depth2d_ms<float> t [[t
 // Remaster run 13 MetalFX upscaling: the upscaled scene into the native back buffer with the scene's depth (by UV,
 // nearest; a multisampled depth gives its nearest sample), so what draws after the scene tests against it.
 struct UpscaleOut { float4 color [[color(0)]]; float depth [[depth(any)]]; };
+// v2.5 MetalFX temporal: zoff = the scene's jitter (scene pixels): the depth is read where the jittered scene put
+// this pixel's surface, so the effects after the scene (AO, fog, depth of field) see it unjittered, as the colour is.
 fragment UpscaleOut upscale_compose_fs(QuadOut i [[stage_in]], texture2d<float> t [[texture(0)]],
-                                       depth2d<float> z [[texture(1)]], sampler s [[sampler(0)]]) {
+                                       depth2d<float> z [[texture(1)]], sampler s [[sampler(0)]],
+                                       constant float2 &zoff [[buffer(0)]]) {
     uint2 size = uint2(z.get_width(), z.get_height());
-    uint2 p = min(uint2(i.uv * float2(size)), size - uint2(1));
+    uint2 p = uint2(clamp(i.uv * float2(size) + zoff, float2(0.0), float2(size - uint2(1))));
     UpscaleOut o;
     o.color = t.sample(s, i.uv);
     o.depth = z.read(p);
     return o;
 }
 fragment UpscaleOut upscale_compose_ms_fs(QuadOut i [[stage_in]], texture2d<float> t [[texture(0)]],
-                                          depth2d_ms<float> z [[texture(1)]], sampler s [[sampler(0)]]) {
+                                          depth2d_ms<float> z [[texture(1)]], sampler s [[sampler(0)]],
+                                          constant float2 &zoff [[buffer(0)]]) {
     uint2 size = uint2(z.get_width(), z.get_height());
-    uint2 p = min(uint2(i.uv * float2(size)), size - uint2(1));
+    uint2 p = uint2(clamp(i.uv * float2(size) + zoff, float2(0.0), float2(size - uint2(1))));
     float d = z.read(p, 0);
     for (uint k = 1; k < z.get_num_samples(); ++k)
         d = min(d, z.read(p, k));
@@ -2971,7 +2975,7 @@ class Renderer final : public D9Backend {
         // leave it (a blended draw shows what is behind it, whose motion is already there).
         // The car body and its windows draw blended (paint, glass) but write depth: they are surfaces, so they write
         // their own motion too (unblended, pipeline()); a blend without depth writes (smoke, glow) leaves it.
-        const bool want_motion = pass_motion_ && (!blend || (rs[7] && rs[14]));
+        const bool want_motion = pass_motion_ && rs[7] && (!blend || rs[14]);
         if (pass_motion_)
             cw[1] = want_motion ? 3u : 0u;
         uint64_t bkey =
@@ -3441,8 +3445,14 @@ class Renderer final : public D9Backend {
         const float hs = upscale_factor_ > 0.0f ? upscale_draw() : 1.0f;
         vparams.halfpix[0] = d.viewport[2] ? (63.0f / 64.0f) / (d.viewport[2] * hs) : 0.0f;
         vparams.halfpix[1] = d.viewport[3] ? -(63.0f / 64.0f) / (d.viewport[3] * hs) : 0.0f;
-        if (fnd_on_ && fnd_.open)   // run 14 foundation F3: the scene passes' jitter (RECOMP_REMASTER_FOUNDATION_JITTER)
+        // run 14 foundation F3: the scene passes' jitter (RECOMP_REMASTER_FOUNDATION_JITTER). v2.5 MetalFX temporal:
+        // only the 3D geometry (depth-tested draws). A full-screen 2D pass inside the scene (the PC game copies the
+        // picture and draws it back for its effects) jittered again would move the picture by another jitter step
+        // each time, more than the scaler is told: the picture shakes.
+        if (fnd_on_ && fnd_.open && (!tmp_on_ || rs[7]))
             fnd_halfpix(d, vparams.halfpix);
+        if (tmp_.frame && pass_motion_ && !rs[7])
+            tmp_note_flat(d);
         memcpy(vparams.ascale, ascale, sizeof ascale);
         [enc_ setVertexBytes:&vparams length:sizeof vparams atIndex:17];
         set_constants(true, d.vconst, d.vconst_count, vp);
@@ -5360,6 +5370,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             return;
         }
         id<MTLTexture> out = tmp_.frame ? tmp_encode(scene, scene_z, bt->texture) : nil;
+        const bool temporal_out = out != nil;
         if (tmp_.frame) {   // this scene's rows are the next one's previous rows
             tmp_.prev.swap(tmp_.cur);
             tmp_.frame = false;
@@ -5371,7 +5382,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             ++up_.failures;
             out = scene; // still a picture: the compose pass stretches it bilinearly
         }
-        upscale_compose(out, scene_z, up_.bb, up_.ds);
+        upscale_compose(out, scene_z, up_.bb, up_.ds, temporal_out ? (float)fnd_.jx : 0.0f,
+                        temporal_out ? (float)fnd_.jy : 0.0f);
         ++up_.scaled;
         g_upscale_in.store(pack_size(scene.width, scene.height));
         g_upscale_out.store(pack_size(bt->texture.width, bt->texture.height));
@@ -5424,7 +5436,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         return nil;
     }
     // One pass into the native back buffer (and its depth, when the scene had one): every pixel and sample.
-    void upscale_compose(id<MTLTexture> color, id<MTLTexture> scene_z, uint32_t bb, uint32_t ds) {
+    void upscale_compose(id<MTLTexture> color, id<MTLTexture> scene_z, uint32_t bb, uint32_t ds, float zx = 0.0f,
+                         float zy = 0.0f) {
         HostD9Target target{};
         target.color[0].id = bb;
         target.depth.id = scene_z ? ds : 0;
@@ -5472,8 +5485,11 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         q.uv[3] = 1.0f;
         [enc_ setVertexBytes:&q length:sizeof q atIndex:0];
         [enc_ setFragmentTexture:color atIndex:0];
-        if (z)
+        if (z) {
             [enc_ setFragmentTexture:scene_z atIndex:1];
+            const float zoff[2] = {zx, zy};
+            [enc_ setFragmentBytes:zoff length:sizeof zoff atIndex:0];
+        }
         uint32_t st[14] = {};
         st[1] = st[2] = st[3] = 3; // clamp
         st[5] = st[6] = 2;         // linear (exact at the same size; a fallback stretch otherwise)
@@ -5531,10 +5547,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         if (tmp_on_ && (up_.frames + 1) % 600 == 0)
             fprintf(stderr,
                     "[remaster] temporal: scenes %llu scaled %llu spatial %llu resets %llu | motion draws %llu: previous "
-                    "constants %llu, new %llu, drawn plain %llu | jitter sign %+.0f\n",
+                    "constants %llu, new %llu, drawn plain %llu, flat %llu | jitter sign %+.0f\n",
                     (unsigned long long)tmp_.scenes, (unsigned long long)tmp_.scaled, (unsigned long long)tmp_.spatial,
                     (unsigned long long)tmp_.resets, (unsigned long long)tmp_.draws, (unsigned long long)tmp_.known,
-                    (unsigned long long)tmp_.fresh, (unsigned long long)tmp_.plain,
+                    (unsigned long long)tmp_.fresh, (unsigned long long)tmp_.plain, (unsigned long long)tmp_.flat,
                     g_temporal_flip.load(std::memory_order_relaxed) ? -tmp_jsign_ : tmp_jsign_);
         up_.pre_frame = 0;
         up_.begun_frame = false;
@@ -5665,6 +5681,15 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         [enc_ setVertexBytes:known length:sizeof known atIndex:21];
         if (n)
             tmp_.cur[id].c.assign(d.vconst, d.vconst + (size_t)n * 4);
+    }
+    // TEST: what draws flat (no depth test) inside the scene, by label (the first 16 kinds, logged once each).
+    void tmp_note_flat(const HostD9Draw &d) {
+        ++tmp_.flat;
+        if (tmp_.flat_labels.size() < 16 && tmp_.flat_labels.insert(d.label ? d.label : "(no label)").second)
+            fprintf(stderr, "[remaster] temporal: flat draw in the scene (not jittered, no motion): %s, %ux%u viewport, "
+                            "blend %u\n",
+                    d.label ? d.label : "(no label)", (unsigned)d.viewport[2], (unsigned)d.viewport[3],
+                    d.render_state[27]);
     }
     // The scene depth as a plain Depth32Float (only when the scaler would not take the scene's own format).
     id<MTLTexture> tmp_zcopy(id<MTLTexture> z) {
@@ -5830,7 +5855,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         ++fnd_.windows;
         fnd_.jx = fnd_.jy = 0.0;
         if (fnd_jitter_) {   // F3: Halton(2,3), 8 x f^2 phases; a fixed phase with _JITTER_PHASE
-            fnd_.phases = remaster_fnd::jitter_phases(upscale_factor_ > 0.0f ? upscale_factor_ : 1.0);
+            // v2.5: the scene's real ratio (its backing is in place: scale is the scene's, alt_scale the native),
+            // not the launch factor: 1.2x is 12 phases, not 32 (a shorter cycle settles sooner)
+            double ratio = upscale_factor_ > 0.0f ? upscale_factor_ : 1.0;
+            if (const Tex *t = tex_ptr(bb); t && t->aliased && t->scale > 0.0f && t->alt_scale > t->scale)
+                ratio = (double)t->alt_scale / t->scale;
+            fnd_.phases = remaster_fnd::jitter_phases(ratio);
             fnd_.phase = fnd_jitter_ >= 1000 ? (uint32_t)(fnd_jitter_ - 1000) % fnd_.phases
                                              : (uint32_t)(fnd_.windows % fnd_.phases);
             remaster_fnd::jitter(fnd_.phase, &fnd_.jx, &fnd_.jy);
@@ -7611,6 +7641,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         std::unordered_map<uint64_t, int32_t> clip;        // vs key -> clip register (-1: no 4-dp4 oPos)
         uint64_t last_present = 0;
         uint64_t scenes = 0, scaled = 0, spatial = 0, resets = 0, draws = 0, known = 0, fresh = 0, noform = 0, plain = 0;
+        uint64_t flat = 0;              // draws in the scene without a depth test (2D passes): not jittered, no motion
+        std::set<std::string> flat_labels;
     } tmp_;
     struct {
         bool checked = false, supported = false;
