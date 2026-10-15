@@ -1027,27 +1027,45 @@ static bool motion_varyings(std::string *s) {
     s->insert(at + strlen(kEnd), "    float4 mv_c; float4 mv_p;\n");
     return true;
 }
-// mv_c = opos before the fixups; mv_p = the oPos input through the previous rows at buffer(20) (zero without the form).
+// mv_c = opos before the fixups; mv_p = the same program run again on the draw's constants of the previous frame
+// (buffer(20); mvk.x = 1 when there are some, else mv_p = 0 and the host's camera pass fills the pixel). The second
+// run is the body text with c[ -> cp[ in a scope of its own, so any position maths (two-step world x view-projection,
+// skinning, the variants' extra lines) gives its real previous position.
 static bool motion_vs_patch(std::string *s) {
     static const char kOut[] = "    D9V2F o;\n    o.pos = opos;\n";
     static const char kP[] = "constant D9VSParams &P [[buffer(17)]]";
-    std::map<std::string, FefRows> w;
-    int in = -1;
-    if (fef_parse_rows(*s, &w)) {
-        const auto o = w.find("opos");
-        if (o != w.end() && fef_rows(o->second) >= 0)
-            in = o->second.in;
-    }
+    std::string body;
     const size_t b = s->find(kOut), p = s->find(kP);
-    if (b == std::string::npos || p == std::string::npos || s->find(kOut, b + 1) != std::string::npos ||
-        s->find("buffer(20)") != std::string::npos)
+    if (!fef_vs_body(*s, &body) || b == std::string::npos || p == std::string::npos ||
+        s->find(kOut, b + 1) != std::string::npos || s->find("buffer(20)") != std::string::npos ||
+        s->find("buffer(21)") != std::string::npos)
         return false;
-    const std::string v = "vv[" + std::to_string(in) + "]";
-    s->insert(b + strlen(kOut),
-              in >= 0 ? "    o.mv_c = opos;\n    o.mv_p = float4(dot(" + v + ", mvp[0]), dot(" + v + ", mvp[1]), dot(" + v +
-                            ", mvp[2]), dot(" + v + ", mvp[3]));\n"
-                      : std::string("    o.mv_c = opos;\n    o.mv_p = float4(0.0);\n"));
-    s->insert(p + strlen(kP), ",\n                     constant float4 *mvp [[buffer(20)]]");
+    std::string prev;
+    prev.reserve(body.size() + 64);
+    for (size_t i = 0; i < body.size(); ++i) {
+        const char before = i ? body[i - 1] : ' ';
+        if (body[i] == 'c' && i + 1 < body.size() && body[i + 1] == '[' && !isalnum((unsigned char)before) &&
+            before != '_' && before != '.') {
+            prev += "cp";
+            continue;
+        }
+        prev += body[i];
+    }
+    const std::string block = "    float4 mv_prev = float4(0.0);\n"
+                              "    if (mvk.x > 0.5) {   // v2.5 MetalFX temporal: the previous frame's position\n"
+                              "        float4 r[32] = {};\n"
+                              "        float4 a0 = float4(0.0);\n"
+                              "        int aL = 0;\n"
+                              "        float4 opos = float4(0.0), ofog = float4(1.0), opsize = float4(1.0);\n"
+                              "        float4 od[2] = { float4(1.0), float4(0.0) };\n"
+                              "        float4 ot[8] = {};\n" +
+                              prev +
+                              "        mv_prev = opos;\n"
+                              "        (void)a0; (void)aL; (void)ofog; (void)opsize; (void)od; (void)ot; (void)r;\n"
+                              "    }\n";
+    s->insert(b + strlen(kOut), "    o.mv_c = opos;\n    o.mv_p = mv_prev;\n");
+    s->insert(b, block);
+    s->insert(p + strlen(kP), ",\n                     constant float4 *cp [[buffer(20)]], constant float4 &mvk [[buffer(21)]]");
     return motion_varyings(s);
 }
 // colour 1 = (previous - current) in UV units (x right, y down), or x = 60000 (no previous position: the camera pass).

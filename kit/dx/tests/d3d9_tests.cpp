@@ -1272,11 +1272,12 @@ static void test_foundation() {
         mv.motion = 1;
         std::string form, plain, why;
         CHECK(d9msl::vertex_source(d9sh::program_for(vs(r, 8)), mv, &form, &why));
-        CHECK(form.find("o.mv_p = float4(dot(vv[0], mvp[0])") != std::string::npos);
+        CHECK(form.find("dot((vv[0].xyzw), (cp[4].xyzw))") != std::string::npos);
+        CHECK(form.find("o.mv_p = mv_prev;") != std::string::npos);
         CHECK(form.find("float4 mv_c; float4 mv_p;") != std::string::npos);
         CHECK(form.find("[[buffer(20)]]") != std::string::npos);
         CHECK(d9msl::vertex_source(d9sh::program_for(vs(bad, -1)), mv, &plain, &why));
-        CHECK(plain.find("o.mv_p = float4(0.0);") != std::string::npos);
+        CHECK(plain.find("(cp[4].xyzw)") != std::string::npos);   // any oPos form: the body runs again
         const std::vector<uint32_t> pw = {0xFFFF0200u, 0x02000001u, 0x800F0800u, 0xA0E40000u, 0x0000FFFFu};
         std::vector<uint8_t> pb(pw.size() * 4);
         memcpy(pb.data(), pw.data(), pb.size());

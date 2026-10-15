@@ -5529,10 +5529,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         if (tmp_on_ && (up_.frames + 1) % 600 == 0)
             fprintf(stderr,
                     "[remaster] temporal: scenes %llu scaled %llu spatial %llu resets %llu | motion draws %llu: previous "
-                    "rows %llu, new %llu, no clip rows %llu, drawn plain %llu | jitter sign %+.0f\n",
+                    "constants %llu, new %llu, drawn plain %llu | jitter sign %+.0f\n",
                     (unsigned long long)tmp_.scenes, (unsigned long long)tmp_.scaled, (unsigned long long)tmp_.spatial,
                     (unsigned long long)tmp_.resets, (unsigned long long)tmp_.draws, (unsigned long long)tmp_.known,
-                    (unsigned long long)tmp_.fresh, (unsigned long long)tmp_.noform, (unsigned long long)tmp_.plain,
+                    (unsigned long long)tmp_.fresh, (unsigned long long)tmp_.plain,
                     g_temporal_flip.load(std::memory_order_relaxed) ? -tmp_jsign_ : tmp_jsign_);
         up_.pre_frame = 0;
         up_.begun_frame = false;
@@ -5636,35 +5636,33 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         ++tmp_.scenes;
     }
     // A motion draw: its identity (programs' vertex half, buffers, range and how many draws of the same before it this
-    // scene) finds its clip rows of the last scene; none (a new object, no 4-dp4 oPos): zeros, the camera fills it.
-    void tmp_bind(const HostD9Draw &d, uint64_t vs_key, const d9sh::Program &vp) {
+    // scene) finds its vertex constants of the last scene (vertex buffer 20, flag at 21); none (a new object): the
+    // flag is 0 and the camera pass fills it. The motion vertex half runs its body again on those constants.
+    void tmp_bind(const HostD9Draw &d, uint64_t vs_key, const d9sh::Program &) {
         ++tmp_.draws;
-        auto it = tmp_.clip.find(vs_key);
-        if (it == tmp_.clip.end()) {
-            uint32_t c = 0;
-            it = tmp_.clip.emplace(vs_key, d9msl::vertex_clip_regs(vp, &c) && c < 252 ? (int32_t)c : -1).first;
-        }
-        TmpRows rows{};
-        if (it->second >= 0 && d.vconst && (uint32_t)it->second + 4 <= d.vconst_count) {
-            uint64_t id = mix(vs_key, (uint64_t)d.stream[0].buffer << 32 | d.stream[0].offset);
-            id = mix(id, (uint64_t)d.index_buffer << 32 | d.start);
-            id = mix(id, (uint64_t)(uint32_t)d.base_vertex << 32 | d.primitive_count);
-            id = mix(id, (uint64_t)d.primitive << 32 | (d.stream[0].buffer ? 0u : d.inline_bytes));
-            id = mix(id, tmp_.occ[id]++);
-            TmpRows now;
-            memcpy(now.r, d.vconst + 4 * it->second, sizeof now.r);
-            auto pv = tmp_.prev.find(id);
-            if (pv != tmp_.prev.end()) {
-                rows = pv->second;
-                ++tmp_.known;
-            } else {
-                ++tmp_.fresh;
-            }
-            tmp_.cur[id] = now;
+        const uint32_t n = std::min<uint32_t>(d.vconst ? d.vconst_count : 0u, 256u);   // setVertexBytes: 4 KB at most
+        uint64_t id = mix(vs_key, (uint64_t)d.stream[0].buffer << 32 | d.stream[0].offset);
+        id = mix(id, (uint64_t)d.index_buffer << 32 | d.start);
+        id = mix(id, (uint64_t)(uint32_t)d.base_vertex << 32 | d.primitive_count);
+        id = mix(id, (uint64_t)d.primitive << 32 | (d.stream[0].buffer ? 0u : d.inline_bytes));
+        id = mix(id, tmp_.occ[id]++);
+        float known[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float *prev = zero;
+        size_t prev_bytes = sizeof zero;
+        auto pv = tmp_.prev.find(id);
+        if (n && pv != tmp_.prev.end() && pv->second.c.size() == (size_t)n * 4) {
+            prev = pv->second.c.data();
+            prev_bytes = (size_t)n * 16;
+            known[0] = 1.0f;
+            ++tmp_.known;
         } else {
-            ++tmp_.noform;
+            ++tmp_.fresh;
         }
-        [enc_ setVertexBytes:rows.r length:sizeof rows.r atIndex:20];
+        [enc_ setVertexBytes:prev length:prev_bytes atIndex:20];
+        [enc_ setVertexBytes:known length:sizeof known atIndex:21];
+        if (n)
+            tmp_.cur[id].c.assign(d.vconst, d.vconst + (size_t)n * 4);
     }
     // The scene depth as a plain Depth32Float (only when the scaler would not take the scene's own format).
     id<MTLTexture> tmp_zcopy(id<MTLTexture> z) {
@@ -7590,7 +7588,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // MetalFX's jitter is the sample offset: the geometry moved by (jx, jy) pixels samples at minus that. 1 flips it.
     const float tmp_jsign_ = [] { const char *e = getenv("RECOMP_TEMPORAL_JITTER_SIGN"); return e && *e == '1' ? 1.0f : -1.0f; }();
     struct TmpRows {
-        float r[16];
+        std::vector<float> c;   // the draw's vertex constants (4 floats each)
     };
     struct {
         bool frame = false, cleared = false, wrote = false, motion_ok = false, reset_next = true, failed = false;
