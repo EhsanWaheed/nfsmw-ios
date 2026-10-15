@@ -4,6 +4,7 @@
 #include "../gpu/upscale_control.h"
 #include "../../dx/host_d9.h" // host_d9_game_phase
 extern "C" void host_ios_panel_focus(bool open); // main.cpp: the panel takes the game's focus while open
+#include "../input.h" // host_input_key: the game's own pause (Escape) when the panel opens in a race
 #include "../../mods/mods_internal.h"
 #include "../../mods/settings_menu.h"
 #include "../../runtime/display_seam.h"
@@ -25,7 +26,7 @@ namespace {
 
 // NSUserDefaults keys.
 NSString *const kRows = @"ios.internalRows";         // scene height in pixels; 0 native
-NSString *const kFps = @"ios.frameCap";              // 30, 60, 90 or 120
+NSString *const kFps = @"ios.frameCap";              // 30, 60, 80 or 120
 NSString *const kDynamic = @"ios.dynamicResolution"; // step down while the device is hot
 NSString *const kStretch = @"ios.stretch";           // retired: the output has the screen's shape; forced off
 NSString *const kOutput = @"ios.outputRows";        // the game's own resolution (its height); 0 the screen's
@@ -76,7 +77,8 @@ const int kRowSteps[] = {540, 600, 640, 720, 800, 900, 1080, 1440};
 const int kOutputSteps[] = {720, 900, 1080};
 constexpr int kDefaultOutput = 720;
 int g_launch_output = kDefaultOutput; // the output height this launch uses (ios_overlay_apply_launch_settings)
-const int kFpsSteps[] = {30, 60, 90, 120};
+// 80, not 90: ProMotion refreshes at 120/80/60/40/30, so a 90 cap ran at 80 with the odd frame over.
+const int kFpsSteps[] = {30, 60, 80, 120};
 
 std::atomic<bool> g_visible{false};
 
@@ -332,6 +334,8 @@ UIVisualEffect *glass_effect(BOOL interactive) {
             defaultRows = r;
     [defaults() registerDefaults:@{kRows : @(defaultRows), kFps : @60, kDynamic : @YES, kStretch : @NO,
                                    kEffects : @YES}];
+    if ([defaults() integerForKey:kFps] == 90) // a cap saved before 80 replaced 90
+        [defaults() setInteger:80 forKey:kFps];
     _appliedRows = -2;
     _tab = TAB_HOME;
     [self buildPanel];
@@ -1405,7 +1409,20 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [self.window bringSubviewToFront:self.root];
     self.root.hidden = NO;
     g_visible = true;
-    host_ios_panel_focus(true);   // the game pauses (in a race) while the panel is open
+    // In a race (phase 2) the game keeps running without focus, so press its own pause (Escape) for it: the
+    // pause menu is up behind the panel, and the player resumes from it after closing. The panel takes the
+    // focus only after the key is up, so the game still reads it.
+    if (host_d9_game_phase() == 2) {
+        host_input_key(0x35, true); // kVK_Escape
+        fprintf(stderr, "[ios] overlay: paused the race (Escape)\n");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            host_input_key(0x35, false);
+            if (g_visible.load())
+                host_ios_panel_focus(true);
+        });
+    } else {
+        host_ios_panel_focus(true);
+    }
     [self showTab:_tab];
     [self applyFrameCap];         // 30 fps while open
 }

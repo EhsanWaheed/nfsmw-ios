@@ -649,6 +649,16 @@ static void pool_stats_frame();   // Remaster run 10 (below gpu_draw)
 void Dev_Present(X86 *c) {
     ComObj *dev = this_device9(c);
     ++g_d9_presents;
+    // In the background iOS refuses GPU work and the drawable goes away; a game that keeps rendering there
+    // fails every command buffer and comes back to a frozen picture. Hold the game here until the app returns.
+    if (host_d9_suspended()) {
+        LOGW("d3d9: app in background, holding the game at present");
+        while (host_d9_suspended())
+            guest_sleep_ms(50);
+        if (dev)
+            dev->present_deadline = FrameDeadline{};
+        LOGW("d3d9: app back in the foreground, resuming");
+    }
     if (dev) {
         const int fps = recomp_env("PIN_CLOCK") ? 0 : mods_display_fps();
         if (fps != dev->present_fps) {

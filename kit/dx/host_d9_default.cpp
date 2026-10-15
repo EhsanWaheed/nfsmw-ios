@@ -8,6 +8,9 @@
 // the defaults, so every host (and the tests) has it.
 uint32_t host_d9_hdr_float = 0;
 
+HOST_D9_DEFAULT int host_d9_suspended(void) {
+    return 0;
+}
 HOST_D9_DEFAULT int host_d9_active(void) {
     return 0;
 }

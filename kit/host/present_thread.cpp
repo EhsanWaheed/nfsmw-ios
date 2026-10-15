@@ -2168,6 +2168,10 @@ controls::ControlsView host_present_controls(void) {
 bool host_present_suspended(void) {
     return g_present_suspended.load();
 }
+// host_d9.h: the D3D9 device holds the game at Present while this is set.
+extern "C" int host_d9_suspended(void) {
+    return g_present_suspended.load() ? 1 : 0;
+}
 
 // Present with a sync interval returns at a vertical blank on Windows, and a
 // renderer that asks for one paces its whole loop by it. This is how long

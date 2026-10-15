@@ -228,6 +228,9 @@ void host_d9_scene_split(uint32_t phase, uint32_t bb, uint32_t ds);
 // The iOS panel holds the front end at 60 fps and a pause at 30 (ios_overlay.mm applyFrameCap).
 enum { HOST_D9_GAME_PHASE = 248 };
 uint32_t host_d9_game_phase(void);
+// v2.4: nonzero while the app is in the background (the presenter is suspended). Present holds the game at its
+// next frame until it returns 0, so no GPU work is submitted where iOS refuses it. Default 0.
+int host_d9_suspended(void);
 // Remaster run 14 foundation F1 (review/run14/foundation-design.md 1, G): the core mod's camera for the scene window,
 // sent only with RECOMP_REMASTER_FOUNDATION=1 as two private SetTransform states the device turns into one event (never
 // device state; 0x200/0x201 are outside D3D's transform range). `view`: the camera's world -> view matrix, 16 floats,
