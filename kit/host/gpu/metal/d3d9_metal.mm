@@ -5799,7 +5799,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             sc.motionVectorScaleX = 1.0f;
             sc.motionVectorScaleY = 1.0f;
             sc.depthReversed = NO;
-            const bool reset = tmp_.reset_next || fnd_.reset != 0;
+            // Only a real break in the picture resets the history: the G/K camera check's disagreement (the front end
+            // fails it every frame) and a missing VP_k are the camera-motion path's, not the scaler's.
+            using namespace remaster_fnd;
+            const bool reset = tmp_.reset_next || (fnd_.reset & (RESET_CUT | RESET_JUMP | RESET_FOV | RESET_GAP | RESET_RESIZE)) != 0;
             sc.reset = reset;
             tmp_.resets += reset;
             tmp_.reset_next = false;
@@ -6082,10 +6085,15 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         fnd_harvest();
         Tex *dt = fnd_.ds ? tex_ptr(fnd_.ds) : nullptr;
         id<MTLTexture> z = dt ? (dt->drawn_depth ? dt->drawn_depth : dt->texture) : nil;
+        // v2.5 MetalFX temporal: without the camera (the front end's garage, a first frame) the pass still runs
+        // with no camera motion, so the draws' own vectors reach the scaler and the frame stays temporal.
+        bool cam = true;
         if (!valid || !fnd_.prev_valid) {
             ++fnd_.motion_skip[0];
             fnd_.prevz_valid = false;
-            return;
+            if (!tmp_.frame)
+                return;
+            cam = false;
         }
         if (!bt || !bt->texture || !z || !fnd_library()) {
             ++fnd_.motion_skip[1];
@@ -6098,14 +6106,17 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             fnd_.prevz_valid = false;
             return;
         }
-        M4 R, Rsky;
-        if (!reprojection(vp, fnd_.vp_prev, &R)) {
+        M4 R = identity(), Rsky;
+        if (cam && !reprojection(vp, fnd_.vp_prev, &R)) {
             ++fnd_.motion_skip[3];
             fnd_.prevz_valid = false;
-            return;
+            if (!tmp_.frame)
+                return;
+            cam = false;
+            R = identity();
         }
         Rsky = R;
-        if (P && fnd_.prev_cam_valid && fnd_.cam.have && fnd_.cam_prev.have) {   // the sky: rotation only
+        if (cam && P && fnd_.prev_cam_valid && fnd_.cam.have && fnd_.cam_prev.have) {   // the sky: rotation only
             M4 rs;
             if (reprojection(mul(rotation_only(fnd_.cam.V), *P), mul(rotation_only(fnd_.cam_prev.V), fnd_.p_prev), &rs))
                 Rsky = rs;
@@ -7570,7 +7581,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // variants: the same vertex through its clip rows of the previous frame, matched by draw identity) into `om`; the
     // foundation's camera pass fills every other pixel from the depth; MTLFXTemporalScaler then takes the scene, its
     // depth, those vectors and the jitter. Anything missing on a frame: that frame is scaled spatially, history reset.
-    const bool tmp_on_ = upscale_temporal_ && fnd_on_ && fnd_jitter_ == 1;
+    // From the environment itself: fnd_on_ / fnd_jitter_ are declared (so initialised) after this member.
+    const bool tmp_on_ = [] {
+        const char *t = getenv("RECOMP_REMASTER_UPSCALE_TEMPORAL"), *f = getenv("RECOMP_REMASTER_FOUNDATION"),
+                   *j = getenv("RECOMP_REMASTER_FOUNDATION_JITTER"), *k = getenv("RECOMP_REMASTER_FOUNDATION_JITTER_PHASE");
+        return t && *t == '1' && f && *f == '1' && j && *j == '1' && !(k && *k);
+    }();
     // MetalFX's jitter is the sample offset: the geometry moved by (jx, jy) pixels samples at minus that. 1 flips it.
     const float tmp_jsign_ = [] { const char *e = getenv("RECOMP_TEMPORAL_JITTER_SIGN"); return e && *e == '1' ? 1.0f : -1.0f; }();
     struct TmpRows {
