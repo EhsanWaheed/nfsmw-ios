@@ -50,6 +50,11 @@ struct D9M4State {
     uint64_t tex[3][32];
     uint64_t smp[3][16];
     uint64_t barriers = 0, uploaded = 0, reused = 0, table_sets = 0, table_skips = 0;
+    // Diagnostics (the perf line): residency changes, and the render thread's time by kind, measured on one frame in 8
+    // (sampling = true) so the clock reads stay cheap. Kinds: 0 binds, 1 uploads, 2 draws, 3 passes, 4 commits.
+    uint64_t res_adds = 0, res_removes = 0, res_commits = 0, uses = 0;
+    bool sampling = false;
+    uint64_t t_ns[5] = {}, sampled_frames = 0;
     D9M4State() {
         memset(addr, 0xff, sizeof addr);
         memset(tex, 0xff, sizeof tex);
@@ -90,10 +95,12 @@ struct D9M4State {
         if (!r)
             return nullptr;
         const void *k = (__bridge const void *)r;
+        ++uses;
         if (Slot *x = find(k)) {
             x->last = now;
             return x;
         }
+        ++res_adds;
         if ((count + 1) * 10 > slots.size() * 9)   // nearly full (the commit-time growth missed it): grow now
             rebuild(slots.size() * 2);
         [resident addAllocation:(id<MTLAllocation>)r];
@@ -117,6 +124,7 @@ struct D9M4State {
         for (Slot &x : slots)
             if (x.key && x.last + 2 < now && x.last <= completed) {
                 [resident removeAllocation:(id<MTLAllocation>)x.obj];
+                ++res_removes;
                 x.key = nullptr;
                 x.obj = nil;
                 --count;
@@ -131,6 +139,7 @@ struct D9M4State {
         if (resident_dirty) {
             [resident commit];
             resident_dirty = false;
+            ++res_commits;
         }
     }
     bool read_conflict(const Slot *x) const { return x && x->wgen == gen; }
@@ -149,6 +158,18 @@ struct D9M4State {
         ++barriers;
     }
     size_t held() const { return count; }
+};
+
+// A scoped timer for the sampled frames (one clock read pair, only when sampling).
+struct D9M4Timer {
+    D9M4State *st;
+    int kind;
+    uint64_t t0;
+    D9M4Timer(D9M4State *s, int k) : st(s), kind(k), t0(s && s->sampling ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0) {}
+    ~D9M4Timer() {
+        if (t0)
+            st->t_ns[kind] += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+    }
 };
 
 // ---- the Metal 4 context: one per renderer --------------------------------------------------------------------------
@@ -539,91 +560,100 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         }                                                                                                              \
         return;                                                                                                        \
     }
+#define D9_M4K(kind, stmt)                                                                                             \
+    if (m_) {                                                                                                          \
+        if (@available(macOS 26.0, iOS 26.0, *)) {                                                                     \
+            D9M4Timer t_(st_, kind);                                                                                   \
+            id<MTL4RenderCommandEncoder> e = m_;                                                                       \
+            stmt;                                                                                                      \
+        }                                                                                                              \
+        return;                                                                                                        \
+    }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)p {
-    D9_M4([e setRenderPipelineState:p]);
+    D9_M4K(0, [e setRenderPipelineState:p]);
     [c_ setRenderPipelineState:p];
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)s {
-    D9_M4([e setDepthStencilState:s]);
+    D9_M4K(0, [e setDepthStencilState:s]);
     [c_ setDepthStencilState:s];
 }
 - (void)setStencilReferenceValue:(uint32_t)v {
-    D9_M4([e setStencilReferenceValue:v]);
+    D9_M4K(0, [e setStencilReferenceValue:v]);
     [c_ setStencilReferenceValue:v];
 }
 - (void)setDepthBias:(float)bias slopeScale:(float)slope clamp:(float)clamp {
-    D9_M4([e setDepthBias:bias slopeScale:slope clamp:clamp]);
+    D9_M4K(0, [e setDepthBias:bias slopeScale:slope clamp:clamp]);
     [c_ setDepthBias:bias slopeScale:slope clamp:clamp];
 }
 - (void)setCullMode:(MTLCullMode)m {
-    D9_M4([e setCullMode:m]);
+    D9_M4K(0, [e setCullMode:m]);
     [c_ setCullMode:m];
 }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)m {
-    D9_M4([e setTriangleFillMode:m]);
+    D9_M4K(0, [e setTriangleFillMode:m]);
     [c_ setTriangleFillMode:m];
 }
 - (void)setFrontFacingWinding:(MTLWinding)w {
-    D9_M4([e setFrontFacingWinding:w]);
+    D9_M4K(0, [e setFrontFacingWinding:w]);
     [c_ setFrontFacingWinding:w];
 }
 - (void)setViewport:(MTLViewport)v {
-    D9_M4([e setViewport:v]);
+    D9_M4K(0, [e setViewport:v]);
     [c_ setViewport:v];
 }
 - (void)setScissorRect:(MTLScissorRect)r {
-    D9_M4([e setScissorRect:r]);
+    D9_M4K(0, [e setScissorRect:r]);
     [c_ setScissorRect:r];
 }
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {
-    D9_M4([e setBlendColorRed:r green:g blue:b alpha:a]);
+    D9_M4K(0, [e setBlendColorRed:r green:g blue:b alpha:a]);
     [c_ setBlendColorRed:r green:g blue:b alpha:a];
 }
 - (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset {
-    D9_M4([e setVisibilityResultMode:mode offset:offset]);
+    D9_M4K(0, [e setVisibilityResultMode:mode offset:offset]);
     [c_ setVisibilityResultMode:mode offset:offset];
 }
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
-    D9_M4((void)e; d9_set_addr(st_, 0, vt_, index, [cmd_ upload:bytes length:length slot:(int)index]));
+    D9_M4K(1, (void)e; d9_set_addr(st_, 0, vt_, index, [cmd_ upload:bytes length:length slot:(int)index]));
     [c_ setVertexBytes:bytes length:length atIndex:index];
 }
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
-    D9_M4((void)e; d9_set_addr(st_, 1, ft_, index, [cmd_ upload:bytes length:length slot:32 + (int)index]));
+    D9_M4K(1, (void)e; d9_set_addr(st_, 1, ft_, index, [cmd_ upload:bytes length:length slot:32 + (int)index]));
     [c_ setFragmentBytes:bytes length:length atIndex:index];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    D9_M4((void)e; [self m4Read:b texture:false]; d9_set_addr(st_, 0, vt_, index, b ? b.gpuAddress + offset : 0));
+    D9_M4K(0, (void)e; [self m4Read:b texture:false]; d9_set_addr(st_, 0, vt_, index, b ? b.gpuAddress + offset : 0));
     [c_ setVertexBuffer:b offset:offset atIndex:index];
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    D9_M4((void)e; [self m4Read:b texture:false]; d9_set_addr(st_, 1, ft_, index, b ? b.gpuAddress + offset : 0));
+    D9_M4K(0, (void)e; [self m4Read:b texture:false]; d9_set_addr(st_, 1, ft_, index, b ? b.gpuAddress + offset : 0));
     [c_ setFragmentBuffer:b offset:offset atIndex:index];
 }
 - (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index {
-    D9_M4((void)e; [self m4Read:t texture:true]; d9_set_tex(st_, 0, vt_, index, t));
+    D9_M4K(0, (void)e; [self m4Read:t texture:true]; d9_set_tex(st_, 0, vt_, index, t));
     [c_ setVertexTexture:t atIndex:index];
 }
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index {
-    D9_M4((void)e; [self m4Read:t texture:true]; d9_set_tex(st_, 1, ft_, index, t));
+    D9_M4K(0, (void)e; [self m4Read:t texture:true]; d9_set_tex(st_, 1, ft_, index, t));
     [c_ setFragmentTexture:t atIndex:index];
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)index {
-    D9_M4((void)e; d9_set_smp(st_, 0, vt_, index, s));
+    D9_M4K(0, (void)e; d9_set_smp(st_, 0, vt_, index, s));
     [c_ setVertexSamplerState:s atIndex:index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)index {
-    D9_M4((void)e; d9_set_smp(st_, 1, ft_, index, s));
+    D9_M4K(0, (void)e; d9_set_smp(st_, 1, ft_, index, s));
     [c_ setFragmentSamplerState:s atIndex:index];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)type vertexStart:(NSUInteger)start vertexCount:(NSUInteger)count {
-    D9_M4([e drawPrimitives:type vertexStart:start vertexCount:count]);
+    D9_M4K(2, [e drawPrimitives:type vertexStart:start vertexCount:count]);
     [c_ drawPrimitives:type vertexStart:start vertexCount:count];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)type
            vertexStart:(NSUInteger)start
            vertexCount:(NSUInteger)count
          instanceCount:(NSUInteger)instances {
-    D9_M4([e drawPrimitives:type vertexStart:start vertexCount:count instanceCount:instances]);
+    D9_M4K(2, [e drawPrimitives:type vertexStart:start vertexCount:count instanceCount:instances]);
     [c_ drawPrimitives:type vertexStart:start vertexCount:count instanceCount:instances];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)type
@@ -631,7 +661,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
                     indexType:(MTLIndexType)itype
                   indexBuffer:(id<MTLBuffer>)ib
             indexBufferOffset:(NSUInteger)offset {
-    D9_M4([self m4Read:ib texture:false]; [e drawIndexedPrimitives:type
+    D9_M4K(2, [self m4Read:ib texture:false]; [e drawIndexedPrimitives:type
                                                          indexCount:count
                                                           indexType:itype
                                                         indexBuffer:ib.gpuAddress + offset
@@ -646,7 +676,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
                 instanceCount:(NSUInteger)instances
                    baseVertex:(NSInteger)baseVertex
                  baseInstance:(NSUInteger)baseInstance {
-    D9_M4([self m4Read:ib texture:false]; [e drawIndexedPrimitives:type
+    D9_M4K(2, [self m4Read:ib texture:false]; [e drawIndexedPrimitives:type
                                                          indexCount:count
                                                           indexType:itype
                                                         indexBuffer:ib.gpuAddress + offset
@@ -664,10 +694,11 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
                  baseInstance:baseInstance];
 }
 - (void)endEncoding {
-    D9_M4([e endEncoding]);
+    D9_M4K(3, [e endEncoding]);
     [c_ endEncoding];
 }
 #undef D9_M4
+#undef D9_M4K
 @end
 
 // A blit on Metal 4 is a compute encoder (MTL4ComputeCommandEncoder does both).
@@ -988,6 +1019,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
     if (!buf_)
         return [[D9RenderEnc alloc] initWithClassic:[c_ renderCommandEncoderWithDescriptor:rp]];
     if (@available(macOS 26.0, iOS 26.0, *)) {
+        D9M4Timer t_(st_, 3);
         MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new];
         std::vector<id<MTLTexture>> att;
         for (NSUInteger i = 0; i < 8; ++i) {
@@ -1068,6 +1100,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         return;
     }
     if (@available(macOS 26.0, iOS 26.0, *)) {
+        D9M4Timer t_(st_, 4);
         id<MTL4CommandBuffer> cb = buf_;
         [cb endCommandBuffer];
         [ctx_ beforeCommit];   // the queue's residency set (new resources since the last commit)

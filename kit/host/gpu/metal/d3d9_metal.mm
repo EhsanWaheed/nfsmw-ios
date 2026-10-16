@@ -2731,7 +2731,20 @@ class Renderer final : public D9Backend {
         if (perf_mark_ != presents_) {   // v4 step 0: this (the encoding) thread's CPU time, sampled once a frame
             perf_mark_ = presents_;
             perf_enc_cpu_ns_ = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+            perf_sample_ = presents_ % 8 == 0;   // the timed frames: one in 8
+            perf_sampled_ += perf_sample_;
+            if (m4_)
+                if (@available(macOS 26.0, iOS 26.0, *))
+                    ((D9M4 *)m4_).st->sampling = perf_sample_;
         }
+        struct DrawTimer {   // the whole draw (both renderers), on the timed frames
+            uint64_t *acc;
+            uint64_t t0;
+            ~DrawTimer() {
+                if (t0)
+                    *acc += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+            }
+        } draw_timer_{&perf_draw_ns_, perf_sample_ ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0};
         if (test_skip_label_ && d.label && !strncmp(d.label, test_skip_label_, strlen(test_skip_label_)))
             return;   // run 16 TEST ONLY (RECOMP_TEST_SKIP_LABEL=<label prefix>): which draws are which on screen
         if (diag_cap_list_)
@@ -7655,7 +7668,20 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 D9M4State *st = m.st;
                 reused = st->reused, sets = st->table_sets, skips = st->table_skips, held = st->held();
                 st->reused = st->table_sets = st->table_skips = 0;
+                const double sf = perf_sampled_ ? (double)perf_sampled_ : 1.0;
+                fprintf(stderr, "[gpu] perf Metal 4 time (ms per frame, timed frames): binds %.2f, uploads %.2f, draws %.2f, "
+                                "passes %.2f, commits %.2f | residency per frame: uses %.0f, added %.1f, removed %.1f, "
+                                "set commits %.2f\n",
+                        st->t_ns[0] / 1e6 / sf, st->t_ns[1] / 1e6 / sf, st->t_ns[2] / 1e6 / sf, st->t_ns[3] / 1e6 / sf,
+                        st->t_ns[4] / 1e6 / sf, st->uses / frames, st->res_adds / frames, st->res_removes / frames,
+                        st->res_commits / frames);
+                memset(st->t_ns, 0, sizeof st->t_ns);
+                st->uses = st->res_adds = st->res_removes = st->res_commits = 0;
             }
+        fprintf(stderr, "[gpu] perf (%s): draw() %.2f ms per frame (timed frames)\n", m4_ ? "Metal 4" : "Metal",
+                perf_sampled_ ? perf_draw_ns_ / 1e6 / perf_sampled_ : 0.0);
+        perf_draw_ns_ = 0;
+        perf_sampled_ = 0;
         fprintf(stderr, "[gpu] perf (%s, per frame, last 600): encode CPU %.2f ms, GPU %.2f ms, frame %.2f ms | draws %.0f, "
                         "passes %.0f, pipeline changes %.0f, command buffers %.1f, uploads %.0f KB\n",
                 m4_ ? "Metal 4" : "Metal", cpu, perf_gpu_us_.exchange(0) / 1e3 / frames, wall,
@@ -7703,7 +7729,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // v4 step 0 (docs/METAL4_PLAN.md): the per-frame cost line, every 600 frames, both renderers.
     std::atomic<uint64_t> perf_gpu_us_{0};
     uint64_t perf_mark_ = ~0ull, perf_enc_cpu_ns_ = 0, perf_last_cpu_ns_ = 0, perf_last_draws_ = 0, perf_pso_changes_ = 0,
-             perf_passes_ = 0, perf_cmds_ = 0, perf_last_t_ = 0;
+             perf_passes_ = 0, perf_cmds_ = 0, perf_last_t_ = 0, perf_draw_ns_ = 0, perf_sampled_ = 0;
+    bool perf_sample_ = false;
     double gpu_wait_s_ = 0;           // time the game thread spent waiting for the GPU
     uint64_t report_cpu_ns_ = 0, report_instructions_ = 0;
     bool in_flight_ = false;
