@@ -275,7 +275,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UISwitch *maxPerf;
 @property(nonatomic) NSArray<UISwitch *> *diag; // the reflection test: tag = its host_d9_diag_set bit, never saved
 @property(nonatomic) UIStackView *diagView;      // the Diagnostics tab
-@property(nonatomic) UISegmentedControl *upscaler; // v2.5: Spatial / Temporal (experimental), next launch
+@property(nonatomic) UISegmentedControl *upscaler; // v2.5: Spatial (default) / Temporal (enhanced), next launch
 @property(nonatomic) UISegmentedControl *renderer; // v4: Metal 4 (default) / Metal (compatibility), next launch
 @property(nonatomic) UISegmentedControl *barriers; // v4: Metal 4 barriers Precise / Safe, next launch
 @property(nonatomic) UIView *notice; // the restart notice
@@ -674,7 +674,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.barriers.selectedSegmentIndex = [defaults() boolForKey:kM4Safe] ? 1 : 0;
     [self.barriers addTarget:self action:@selector(barriersChanged:) forControlEvents:UIControlEventValueChanged];
     [self.renderer addTarget:self action:@selector(rendererChanged:) forControlEvents:UIControlEventValueChanged];
-    self.upscaler = [[UISegmentedControl alloc] initWithItems:@[ @"Spatial", @"Temporal (experimental)" ]];
+    self.upscaler = [[UISegmentedControl alloc] initWithItems:@[ @"Spatial", @"Temporal (enhanced)" ]];
     self.upscaler.selectedSegmentIndex = [defaults() boolForKey:kTemporal] ? 1 : 0;
     [self.upscaler addTarget:self action:@selector(upscalerChanged:) forControlEvents:UIControlEventValueChanged];
 
@@ -759,9 +759,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                     @"above 5/6 of the output draws at 5/6 (upscaling that little leaves fine lines)."
               style:UIFontTextStyleSubheadline],
         self.resolution,
-        [self label:@"Upscaler (next launch): Spatial sharpens each frame on its own. Temporal (experimental) builds "
-                    @"detail over several frames from each object's motion: smoother edges and finer detail, but "
-                    @"new and may smear or shimmer in places. Restart the game to switch."
+        [self label:@"Upscaler (next launch): Spatial sharpens each frame on its own. Temporal (enhanced) builds "
+                    @"detail over several frames from each object's motion: smoother edges and finer detail, "
+                    @"though fast effects may smear a little in places. Restart the game to switch."
               style:UIFontTextStyleSubheadline],
         self.upscaler,
         [self row:@"Frame cap (fps)" control:self.frameCap],
@@ -1635,7 +1635,7 @@ void ios_overlay_apply_launch_settings() {
     // time at no visible cost (owner, 12 Oct).
     // metal4 TEST BRANCH ONLY (revert before a public release): Metal 4 and the Temporal upscaler on by default, so
     // each test install (a new LiveContainer data folder, the settings gone) needs no restarts to get there.
-    [d registerDefaults:@{kOutput : @(kDefaultOutput), kEffects : @YES, kMetal4 : @YES, kTemporal : @YES}];
+    [d registerDefaults:@{kOutput : @(kDefaultOutput), kEffects : @YES, kMetal4 : @YES, kTemporal : @NO}];
     g_launch_output = (int)[d integerForKey:kOutput];
     if ([d boolForKey:kEffects])
         setenv("RECOMP_UPSCALE_EFFECTS_INTERNAL", "1", 0);
@@ -1659,7 +1659,7 @@ void ios_overlay_apply_launch_settings() {
     [d removeObjectForKey:kSim120];
     fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s, upscaler %s\n",
             g_launch_output > 0 ? "" : "the screen's, ", g_launch_output, [d boolForKey:kEffects] ? "ON (test)" : "off",
-            [d boolForKey:kTemporal] ? "temporal (experimental)" : "spatial");
+            [d boolForKey:kTemporal] ? "temporal (enhanced)" : "spatial");
     fprintf(stderr, "[ios] launch options: renderer %s\n", [d boolForKey:kMetal4] ? "Metal 4" : "Metal (compatibility)");
 }
 
