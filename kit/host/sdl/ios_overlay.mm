@@ -35,6 +35,7 @@ NSString *const kSim120 = @"ios.simulation120";      // retired: a 120 Hz simula
 NSString *const kSeeded = @"ios.seededDetail";       // the first-run Detail level was set (once per install)
 NSString *const kMaxPerf = @"ios.maxPerformance";     // Max performance mode (next launch)
 NSString *const kTemporal = @"ios.upscalerTemporal";  // v2.5: MetalFX temporal instead of spatial (next launch)
+NSString *const kMetal4 = @"ios.rendererMetal4";      // v4: the renderer on Metal 4 + MetalFX 4 (next launch)
 NSString *const kMaxPerfSaved = @"ios.maxPerfSaved";  // the player's own values, put back when the mode goes off
 
 // The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp), looked up by key each
@@ -274,6 +275,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) NSArray<UISwitch *> *diag; // the reflection test: tag = its host_d9_diag_set bit, never saved
 @property(nonatomic) UIStackView *diagView;      // the Diagnostics tab
 @property(nonatomic) UISegmentedControl *upscaler; // v2.5: Spatial / Temporal (experimental), next launch
+@property(nonatomic) UISegmentedControl *renderer; // v4: Metal / Metal 4 (experimental), next launch
 @property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
@@ -663,6 +665,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.dynamic = [self switchFor:kDynamic action:@selector(dynamicChanged:)];
     self.effects = [self switchFor:kEffects action:@selector(effectsChanged:)];
     self.status = [self note:@""];
+    self.renderer = [[UISegmentedControl alloc] initWithItems:@[ @"Metal", @"Metal 4 (experimental)" ]];
+    self.renderer.selectedSegmentIndex = [defaults() boolForKey:kMetal4] ? 1 : 0;
+    [self.renderer addTarget:self action:@selector(rendererChanged:) forControlEvents:UIControlEventValueChanged];
     self.upscaler = [[UISegmentedControl alloc] initWithItems:@[ @"Spatial", @"Temporal (experimental)" ]];
     self.upscaler.selectedSegmentIndex = [defaults() boolForKey:kTemporal] ? 1 : 0;
     [self.upscaler addTarget:self action:@selector(upscalerChanged:) forControlEvents:UIControlEventValueChanged];
@@ -768,6 +773,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         hint,
     ];
     self.diagView = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self section:@"Renderer (next launch)"],
+        [self note:@"Metal 4 (experimental): the game's drawing goes through Apple's newest graphics interface, with "
+                   @"MetalFX 4 for the upscaler. Metal is the tested one. If anything looks wrong or freezes, switch "
+                   @"back here and restart."],
+        self.renderer,
         [self section:@"Temporal test"],
         [self rowWithTitle:[self label:@"Flip temporal jitter" style:UIFontTextStyleBody]
                     detail:[self note:@"With the Temporal upscaler: if still edges (poles, signs, the HUD-free road) "
@@ -1290,6 +1300,13 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 - (void)temporalMotionChanged:(UISwitch *)s {
     host_upscale_temporal_show_motion(s.on ? 1 : 0);
 }
+- (void)rendererChanged:(UISegmentedControl *)c {
+    const BOOL m4 = c.selectedSegmentIndex == 1;
+    [defaults() setBool:m4 forKey:kMetal4];
+    fprintf(stderr, "[ios] overlay: renderer %s (restart to apply)\n", m4 ? "Metal 4" : "Metal");
+    [self showRestartNoticeTitle:m4 ? @"Metal 4 renderer is on" : @"Metal renderer is on"
+                            icon:m4 ? @"cpu" : @"arrow.counterclockwise.circle.fill"];
+}
 - (void)temporalFlipChanged:(UISwitch *)s {
     host_upscale_temporal_flip_jitter(s.on ? 1 : 0);
 }
@@ -1611,6 +1628,8 @@ void ios_overlay_apply_launch_settings() {
         setenv("RECOMP_IOS_LOW_POWER", "1", 1);
     // v2.5 MetalFX temporal (experimental): the scaler, and the foundation it needs (the camera, the motion pass and
     // the Halton jitter on the scene's draws). Read once by the renderer and the core mod as they start.
+    if ([d boolForKey:kMetal4])   // v4: read once by the renderer as it starts
+        setenv("RECOMP_METAL4", "1", 1);
     if ([d boolForKey:kTemporal]) {
         setenv("RECOMP_REMASTER_UPSCALE_TEMPORAL", "1", 1);
         setenv("RECOMP_REMASTER_FOUNDATION", "1", 1);
@@ -1621,6 +1640,7 @@ void ios_overlay_apply_launch_settings() {
     fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s, upscaler %s\n",
             g_launch_output > 0 ? "" : "the screen's, ", g_launch_output, [d boolForKey:kEffects] ? "ON (test)" : "off",
             [d boolForKey:kTemporal] ? "temporal (experimental)" : "spatial");
+    fprintf(stderr, "[ios] launch options: renderer %s\n", [d boolForKey:kMetal4] ? "Metal 4 (experimental)" : "Metal");
 }
 
 void ios_overlay_install(SDL_Window *window) {

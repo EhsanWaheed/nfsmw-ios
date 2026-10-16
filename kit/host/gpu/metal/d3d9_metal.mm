@@ -1146,6 +1146,22 @@ class Renderer final : public D9Backend {
             fprintf(stderr, "d3d9 metal: utility shaders failed: %s\n",
                     error.localizedDescription.UTF8String);
         frames_ = dispatch_semaphore_create(3);
+        // v4 Metal 4 (docs/METAL4_PLAN.md; RECOMP_METAL4=1, the iOS panel's Diagnostics Renderer switch): the renderer's
+        // command buffers go to a Metal 4 queue; anything missing and it runs on classic Metal as before.
+        if (const char *e = getenv("RECOMP_METAL4"); e && *e == '1') {
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                NSString *why = nil;
+                m4_ = [D9M4 contextWithDevice:mtl_ why:&why];
+                const bool fx = m4_ && [MTLFXTemporalScalerDescriptor supportsMetal4FX:mtl_];
+                fprintf(stderr, "[gpu] renderer: Metal 4%s%s%s\n", m4_ ? (fx ? " (MetalFX 4)" : " (no MetalFX 4: native 3D)") : " NOT available: classic Metal (",
+                        m4_ ? "" : why.UTF8String, m4_ ? "" : ")");
+                m4_fx_ = fx;
+            } else {
+                fprintf(stderr, "[gpu] renderer: Metal 4 NOT available on this OS: classic Metal\n");
+            }
+        } else {
+            fprintf(stderr, "[gpu] renderer: classic Metal\n");
+        }
         const char *warm = recomp_env("D3D9_SHADER_WARM_DIR"), *seed = recomp_env("D3D9_SHADER_WARM_SEED");
         if ((warm && *warm) || (seed && *seed)) {
             // Namespace of the recorded keys. The compile options themselves are always the current
@@ -4641,9 +4657,20 @@ class Renderer final : public D9Backend {
         hdr_mask_frame_ = false;
         if (t.info.pixel == MTLPixelFormatBGRA8Unorm || t.promoted) {   // item 10: the float frame too (mode 3)
             gpu::CommandBuffer cb = device_->begin();
+            D9M4 *m4 = nil;
+            if (m4_)
+                if (@available(macOS 26.0, iOS 26.0, *))
+                    m4 = (D9M4 *)m4_;
+            if (m4 && last_)   // v4 Metal 4: the presenter's copy waits for this frame (it shared our queue before)
+                device_->encode_wait(cb, m4.done, last_.value);
             if (host_present_stage_texture(t.imported, (int)w, (int)h, (int)guest_w, (int)guest_h,
                                            cb, capture_marker.enabled ? &capture_marker : nullptr))
                 host_present_track_command(cb);
+            if (m4) {   // ... and the next frame's drawing into the back buffer waits for the copy
+                const uint64_t v = [m4 nextPresentedValue];
+                device_->encode_signal(cb, m4.presented, v);
+                [m4 waitPresented:v];
+            }
             device_->commit(cb);
         }
         ++presents_;
@@ -5205,6 +5232,20 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 upscale_end(true);
         }
     }
+    // v4: a MetalFX scaler's work into the open command buffer: classic, or (Metal 4) after a barrier on the scene,
+    // with its textures kept resident and alive by the command buffer.
+    void fx_encode(id sc, std::initializer_list<id<MTLTexture>> textures) {
+        if (!m4_) {
+            [(id<MTLFXSpatialScaler>)sc encodeToCommandBuffer:cmd_.raw];   // both classic scalers answer it
+            return;
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            for (id<MTLTexture> t : textures)
+                [cmd_ touch:t];
+            [cmd_ barrierBeforeForeignWork];
+            [(id<MTL4FXSpatialScaler>)sc encodeToCommandBuffer:(id<MTL4CommandBuffer>)cmd_.m4];
+        }
+    }
     bool upscale_available() {
         if (up_.checked)
             return up_.supported;
@@ -5406,7 +5447,14 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 sd.colorTextureFormat = scene.pixelFormat;
                 sd.outputTextureFormat = scene.pixelFormat;
                 sd.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
-                id<MTLFXSpatialScaler> sc = [sd newSpatialScalerWithDevice:mtl_];
+                id<MTLFXSpatialScaler> sc = nil;   // v4: on Metal 4 an MTL4FXSpatialScaler (same properties)
+                if (m4_) {
+                    if (@available(macOS 26.0, iOS 26.0, *))
+                        if (m4_fx_)
+                            sc = (id<MTLFXSpatialScaler>)[sd newSpatialScalerWithDevice:mtl_ compiler:((D9M4 *)m4_).compiler];
+                } else {
+                    sc = [sd newSpatialScalerWithDevice:mtl_];
+                }
                 if (sc) {
                     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:scene.pixelFormat
                                                                                                   width:ow
@@ -5431,7 +5479,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             sc.outputTexture = up_.out;
             sc.inputContentWidth = iw;
             sc.inputContentHeight = ih;
-            [sc encodeToCommandBuffer:cmd_.raw];
+            fx_encode(sc, {scene, up_.out});
             return up_.out;
         }
         return nil;
@@ -5768,7 +5816,13 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     td.motionTextureFormat = MTLPixelFormatRG16Float;
                     td.outputTextureFormat = scene.pixelFormat;
                     td.autoExposureEnabled = NO;
-                    tmp_.scaler = [td newTemporalScalerWithDevice:mtl_];
+                    if (m4_) {   // v4: an MTL4FXTemporalScaler (same properties)
+                        if (@available(macOS 26.0, iOS 26.0, *))
+                            if (m4_fx_)
+                                tmp_.scaler = [td newTemporalScalerWithDevice:mtl_ compiler:((D9M4 *)m4_).compiler];
+                    } else {
+                        tmp_.scaler = [td newTemporalScalerWithDevice:mtl_];
+                    }
                     tmp_.zcopy = attempt == 1;
                 }
                 id<MTLFXTemporalScaler> sc = tmp_.scaler;
@@ -5832,7 +5886,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             sc.reset = reset;
             tmp_.resets += reset;
             tmp_.reset_next = false;
-            [sc encodeToCommandBuffer:cmd_.raw];
+            fx_encode(sc, {scene, zt, mv, tmp_.out});
             ++tmp_.scaled;
             return tmp_.out;
         }
@@ -6702,7 +6756,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             dispatch_semaphore_wait(frames_, DISPATCH_TIME_FOREVER);
             gpu_wait_s_ += CACurrentMediaTime() - t0;
         }
-        cmd_ = [[D9Cmd alloc] initWithQueue:queue_];
+        cmd_ = new_cmd();
         ++serial_;
         dispatch_semaphore_t sem = frames_;
         uint64_t serial = serial_;
@@ -7199,6 +7253,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         if (it != samplers_.end())
             return it->second;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+        sd.supportArgumentBuffers = YES;   // v4 Metal 4: bound by gpuResourceID in an argument table
         sd.sAddressMode = address_mode(st[1]);
         sd.tAddressMode = address_mode(st[2]);
         sd.rAddressMode = address_mode(st[3]);
@@ -7274,7 +7329,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         rp.depthAttachment.loadAction = MTLLoadActionClear;
         rp.depthAttachment.clearDepth = 1.0;
         rp.depthAttachment.storeAction = MTLStoreActionStore;
-        id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+        D9Cmd *cb = new_cmd();
         [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
         [cb commit];
         return white_depth_;
@@ -7469,6 +7524,14 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     bool bc_ = false;
     dispatch_semaphore_t frames_;
     D9Cmd *cmd_ = nil, *last_ = nil;
+    id m4_ = nil;          // v4: D9M4 (Metal 4) or nil (classic Metal)
+    bool m4_fx_ = false;   // v4: MetalFX 4 scalers available (Metal 4 without them: the 3D scene draws native)
+    D9Cmd *new_cmd() {
+        if (m4_)
+            if (@available(macOS 26.0, iOS 26.0, *))
+                return [[D9Cmd alloc] initWithM4:(D9M4 *)m4_];
+        return [[D9Cmd alloc] initWithQueue:queue_];
+    }
     uint64_t serial_ = 0;
     uint64_t submitted_ = 0, pass_serial_ = 0;
     uint32_t resource_generation_ = 0, trace_flushes_ = 0;

@@ -824,6 +824,20 @@ void MetalDevice::on_complete(CommandBuffer cb, std::function<void(CommandStatus
     if (c)
         c->on_complete.push_back(std::move(fn));
 }
+void MetalDevice::encode_wait(CommandBuffer cb, id<MTLEvent> e, uint64_t value) {
+    std::lock_guard lock(mutex_);
+    if (Cmd *c = cmd(cb)) {
+        end_encoders(*c);
+        [c->buffer encodeWaitForEvent:e value:value];
+    }
+}
+void MetalDevice::encode_signal(CommandBuffer cb, id<MTLEvent> e, uint64_t value) {
+    std::lock_guard lock(mutex_);
+    if (Cmd *c = cmd(cb)) {
+        end_encoders(*c);
+        [c->buffer encodeSignalEvent:e value:value];
+    }
+}
 void MetalDevice::commit(CommandBuffer cb) {
     @autoreleasepool {
         id<MTLCommandBuffer> buffer;

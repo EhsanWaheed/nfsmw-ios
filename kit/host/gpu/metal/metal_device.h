@@ -90,6 +90,9 @@ class MetalDevice final : public Device {
         return queue_;
     }
     Texture import_texture(id<MTLTexture> t);
+    // v4 Metal 4: the D3D9 renderer's queue and this one sync on events (encoders of `cb` end first).
+    void encode_wait(CommandBuffer cb, id<MTLEvent> e, uint64_t value);
+    void encode_signal(CommandBuffer cb, id<MTLEvent> e, uint64_t value);
     id<MTLTexture> native_texture(Texture t);
 
   private:
