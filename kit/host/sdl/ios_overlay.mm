@@ -36,6 +36,7 @@ NSString *const kSeeded = @"ios.seededDetail";       // the first-run Detail lev
 NSString *const kMaxPerf = @"ios.maxPerformance";     // Max performance mode (next launch)
 NSString *const kTemporal = @"ios.upscalerTemporal";  // v2.5: MetalFX temporal instead of spatial (next launch)
 NSString *const kMetal4 = @"ios.rendererMetal4";      // v4: the renderer on Metal 4 + MetalFX 4 (next launch)
+NSString *const kM4Safe = @"ios.metal4SafeBarriers";  // v4: Metal 4 with a barrier before every pass (next launch)
 NSString *const kMaxPerfSaved = @"ios.maxPerfSaved";  // the player's own values, put back when the mode goes off
 
 // The game's core mod's settings, the same store the F10 page edits (mods/settings.cpp), looked up by key each
@@ -276,6 +277,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) UIStackView *diagView;      // the Diagnostics tab
 @property(nonatomic) UISegmentedControl *upscaler; // v2.5: Spatial / Temporal (experimental), next launch
 @property(nonatomic) UISegmentedControl *renderer; // v4: Metal / Metal 4 (experimental), next launch
+@property(nonatomic) UISegmentedControl *barriers; // v4: Metal 4 barriers Precise / Safe, next launch
 @property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
 @property(nonatomic) NSTimer *poll;
@@ -667,6 +669,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.status = [self note:@""];
     self.renderer = [[UISegmentedControl alloc] initWithItems:@[ @"Metal", @"Metal 4 (experimental)" ]];
     self.renderer.selectedSegmentIndex = [defaults() boolForKey:kMetal4] ? 1 : 0;
+    self.barriers = [[UISegmentedControl alloc] initWithItems:@[ @"Precise", @"Safe" ]];
+    self.barriers.selectedSegmentIndex = [defaults() boolForKey:kM4Safe] ? 1 : 0;
+    [self.barriers addTarget:self action:@selector(barriersChanged:) forControlEvents:UIControlEventValueChanged];
     [self.renderer addTarget:self action:@selector(rendererChanged:) forControlEvents:UIControlEventValueChanged];
     self.upscaler = [[UISegmentedControl alloc] initWithItems:@[ @"Spatial", @"Temporal (experimental)" ]];
     self.upscaler.selectedSegmentIndex = [defaults() boolForKey:kTemporal] ? 1 : 0;
@@ -778,6 +783,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                    @"MetalFX 4 for the upscaler. Metal is the tested one. If anything looks wrong or freezes, switch "
                    @"back here and restart."],
         self.renderer,
+        [self note:@"Metal 4 barriers: Precise lets the GPU overlap work that doesn't depend on each other (faster, "
+                   @"cooler). Safe makes every step wait for the one before, as before. If one effect flickers or shows "
+                   @"old frames on Precise, try Safe and tell me."],
+        self.barriers,
         [self section:@"Temporal test"],
         [self rowWithTitle:[self label:@"Flip temporal jitter" style:UIFontTextStyleBody]
                     detail:[self note:@"With the Temporal upscaler: if still edges (poles, signs, the HUD-free road) "
@@ -1307,6 +1316,12 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     [self showRestartNoticeTitle:m4 ? @"Metal 4 renderer is on" : @"Metal renderer is on"
                             icon:m4 ? @"cpu" : @"arrow.counterclockwise.circle.fill"];
 }
+- (void)barriersChanged:(UISegmentedControl *)c {
+    const BOOL safe = c.selectedSegmentIndex == 1;
+    [defaults() setBool:safe forKey:kM4Safe];
+    [self showRestartNoticeTitle:safe ? @"Safe barriers are on" : @"Precise barriers are on"
+                            icon:@"arrow.counterclockwise.circle.fill"];
+}
 - (void)temporalFlipChanged:(UISwitch *)s {
     host_upscale_temporal_flip_jitter(s.on ? 1 : 0);
 }
@@ -1632,6 +1647,8 @@ void ios_overlay_apply_launch_settings() {
     // the Halton jitter on the scene's draws). Read once by the renderer and the core mod as they start.
     if ([d boolForKey:kMetal4])   // v4: read once by the renderer as it starts
         setenv("RECOMP_METAL4", "1", 1);
+    if ([d boolForKey:kM4Safe])
+        setenv("RECOMP_METAL4_BARRIERS", "safe", 1);
     if ([d boolForKey:kTemporal]) {
         setenv("RECOMP_REMASTER_UPSCALE_TEMPORAL", "1", 1);
         setenv("RECOMP_REMASTER_FOUNDATION", "1", 1);

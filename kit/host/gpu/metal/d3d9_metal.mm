@@ -2728,6 +2728,10 @@ class Renderer final : public D9Backend {
     }
     void draw(const HostD9Draw &d) override {
         ++stat_calls_;
+        if (perf_mark_ != presents_) {   // v4 step 0: this (the encoding) thread's CPU time, sampled once a frame
+            perf_mark_ = presents_;
+            perf_enc_cpu_ns_ = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+        }
         if (test_skip_label_ && d.label && !strncmp(d.label, test_skip_label_, strlen(test_skip_label_)))
             return;   // run 16 TEST ONLY (RECOMP_TEST_SKIP_LABEL=<label prefix>): which draws are which on screen
         if (diag_cap_list_)
@@ -3386,6 +3390,7 @@ class Renderer final : public D9Backend {
         if (pso != es_.pipeline) {
             [enc_ setRenderPipelineState:pso];
             es_.pipeline = pso;
+            ++perf_pso_changes_;
         }
 
         // Depth and stencil.
@@ -4674,6 +4679,8 @@ class Renderer final : public D9Backend {
             device_->commit(cb);
         }
         ++presents_;
+        if (presents_ % 600 == 0 && presents_)
+            perf_report();
         if (m4_ && presents_ % 600 == 0 && presents_)   // v4 Metal 4 pipelines: compiled bases vs cheap specializations
             fprintf(stderr, "[gpu] Metal 4 pipelines: %llu compiled (%.0f ms), %llu specialized (%.0f ms), %llu failed\n",
                     (unsigned long long)m4_base_n_, m4_base_ns_ / 1e6, (unsigned long long)m4_spec_n_, m4_spec_ns_ / 1e6,
@@ -5244,9 +5251,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             return;
         }
         if (@available(macOS 26.0, iOS 26.0, *)) {
-            for (id<MTLTexture> t : textures)
-                [cmd_ touch:t];
-            [cmd_ barrierBeforeForeignWork];
+            [cmd_ barrierBeforeForeignWork:textures];
             [(id<MTL4FXSpatialScaler>)sc encodeToCommandBuffer:(id<MTL4CommandBuffer>)cmd_.m4];
         }
     }
@@ -5440,6 +5445,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             const NSUInteger iw = scene.width, ih = scene.height, ow = native.width, oh = native.height;
             if (!up_.scaler || up_.sc_iw != iw || up_.sc_ih != ih || up_.sc_ow != ow || up_.sc_oh != oh ||
                 up_.sc_fmt != scene.pixelFormat) {
+                m4_keep(up_.scaler);   // v4 Metal 4: the GPU may still be using it
                 up_.scaler = nil;
                 up_.out = nil;
                 up_.sc_iw = iw, up_.sc_ih = ih, up_.sc_ow = ow, up_.sc_oh = oh, up_.sc_fmt = scene.pixelFormat;
@@ -5806,6 +5812,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             const NSUInteger iw = scene.width, ih = scene.height, ow = native.width, oh = native.height;
             if (!tmp_.scaler || tmp_.iw != iw || tmp_.ih != ih || tmp_.ow != ow || tmp_.oh != oh ||
                 tmp_.cf != scene.pixelFormat || tmp_.df != z.pixelFormat) {
+                m4_keep(tmp_.scaler);   // v4 Metal 4: the GPU may still be using it
                 tmp_.scaler = nil;
                 tmp_.out = nil;
                 tmp_.iw = iw, tmp_.ih = ih, tmp_.ow = ow, tmp_.oh = oh, tmp_.cf = scene.pixelFormat, tmp_.df = z.pixelFormat;
@@ -6548,6 +6555,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             pass_vis_ = true;
         }
         enc_ = [cmd_ renderCommandEncoderWithDescriptor:rp];
+        ++perf_passes_;
         if (trace_) {
             ++pass_serial_;
             if (enc_) {
@@ -6766,10 +6774,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         uint64_t serial = serial_;
         std::atomic<uint64_t> *done = &completed_;
         std::atomic<uint64_t> *gpu_us = &gpu_us_;
+        std::atomic<uint64_t> *perf_gpu = &perf_gpu_us_;
         [cmd_ addDone:^(NSError *error, double gpu_s) {
           if (gpu_s > 0.0) {
               const uint64_t us = (uint64_t)(gpu_s * 1e6);
               gpu_us->fetch_add(us);
+              perf_gpu->fetch_add(us, std::memory_order_relaxed);
               g_host_game_gpu_us.fetch_add(us, std::memory_order_relaxed); // Test83: the overlay's GPU
           }
           if (error)
@@ -7628,7 +7638,47 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     D9Cmd *cmd_ = nil, *last_ = nil;
     id m4_ = nil;          // v4: D9M4 (Metal 4) or nil (classic Metal)
     bool m4_fx_ = false;   // v4: MetalFX 4 scalers available (Metal 4 without them: the 3D scene draws native)
+    // v4 step 0: per frame over the last 600: the encoding thread's CPU, GPU time, draws, passes, pipeline changes,
+    // command buffers and (Metal 4) upload bytes; real time per frame for the frame rate.
+    void perf_report() {
+        const uint64_t now = os_monotonic_ns();
+        const double frames = 600.0;
+        const double cpu = perf_last_cpu_ns_ && perf_enc_cpu_ns_ > perf_last_cpu_ns_
+                               ? (perf_enc_cpu_ns_ - perf_last_cpu_ns_) / 1e6 / frames : 0.0;
+        const double wall = perf_last_t_ ? (now - perf_last_t_) / 1e6 / frames : 0.0;
+        uint64_t up = 0, bars = 0, reused = 0, sets = 0, skips = 0, held = 0;
+        if (m4_)
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                D9M4 *m = (D9M4 *)m4_;
+                up = [m takeUploadedBytes];
+                bars = [m takeBarriers];
+                D9M4State *st = m.st;
+                reused = st->reused, sets = st->table_sets, skips = st->table_skips, held = st->held.size();
+                st->reused = st->table_sets = st->table_skips = 0;
+            }
+        fprintf(stderr, "[gpu] perf (%s, per frame, last 600): encode CPU %.2f ms, GPU %.2f ms, frame %.2f ms | draws %.0f, "
+                        "passes %.0f, pipeline changes %.0f, command buffers %.1f, uploads %.0f KB\n",
+                m4_ ? "Metal 4" : "Metal", cpu, perf_gpu_us_.exchange(0) / 1e3 / frames, wall,
+                (draws_ - perf_last_draws_) / frames, perf_passes_ / frames, perf_pso_changes_ / frames, perf_cmds_ / frames,
+                up / 1024.0 / frames);
+        if (m4_)
+            fprintf(stderr, "[gpu] perf Metal 4 (per frame): barriers %.1f (%s), uploads reused %.0f, table entries set %.0f "
+                            "skipped %.0f, resident %llu\n",
+                    bars / frames, getenv("RECOMP_METAL4_BARRIERS") && !strcmp(getenv("RECOMP_METAL4_BARRIERS"), "safe")
+                                       ? "safe" : "precise",
+                    reused / frames, sets / frames, skips / frames, (unsigned long long)held);
+        perf_last_cpu_ns_ = perf_enc_cpu_ns_;
+        perf_last_draws_ = draws_;
+        perf_last_t_ = now;
+        perf_passes_ = perf_pso_changes_ = perf_cmds_ = 0;
+    }
+    void m4_keep(id object) {
+        if (m4_ && object)
+            if (@available(macOS 26.0, iOS 26.0, *))
+                [(D9M4 *)m4_ keepAlive:object];
+    }
     D9Cmd *new_cmd() {
+        ++perf_cmds_;
         if (m4_)
             if (@available(macOS 26.0, iOS 26.0, *))
                 return [[D9Cmd alloc] initWithM4:(D9M4 *)m4_];
@@ -7650,6 +7700,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     std::future<CaptureSave> capture_job_;
     std::atomic<uint64_t> completed_{0};
     std::atomic<uint64_t> gpu_us_{0}; // GPU time of finished command buffers since the last report
+    // v4 step 0 (docs/METAL4_PLAN.md): the per-frame cost line, every 600 frames, both renderers.
+    std::atomic<uint64_t> perf_gpu_us_{0};
+    uint64_t perf_mark_ = ~0ull, perf_enc_cpu_ns_ = 0, perf_last_cpu_ns_ = 0, perf_last_draws_ = 0, perf_pso_changes_ = 0,
+             perf_passes_ = 0, perf_cmds_ = 0, perf_last_t_ = 0;
     double gpu_wait_s_ = 0;           // time the game thread spent waiting for the GPU
     uint64_t report_cpu_ns_ = 0, report_instructions_ = 0;
     bool in_flight_ = false;

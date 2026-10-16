@@ -5,14 +5,21 @@
 //
 // Classic Metal: each object forwards to the MTLCommandBuffer / encoder it wraps.
 // Metal 4 (D9M4, RECOMP_METAL4=1 on a device of the Metal 4 family): command buffers come from the device and go to
-// an MTL4CommandQueue; encoders bind through MTL4ArgumentTables (one per stage); setVertexBytes and the like copy into
-// the command buffer's upload chunks and bind their GPU address; every resource an encoder touches is held by the
-// command buffer until the GPU is done with it (Metal 4 command buffers retain nothing) and put in its residency set;
-// each pass starts with a consumer barrier on all earlier work (Metal 4 tracks no hazards; the classic ordering).
-// Completion: the queue signals the shared event with the command buffer's value; its feedback handler reports.
+// an MTL4CommandQueue; encoders bind through MTL4ArgumentTables (one per stage, an entry set only when it changes);
+// setVertexBytes and the like copy into the command buffer's upload chunks (the same bytes as the slot's last upload
+// in this command buffer: that upload again) and bind their GPU address. Every resource the GPU work touches joins
+// one long-lived residency set on the queue, which also keeps it alive (Metal 4 command buffers retain nothing)
+// until it has been unused for a while and the GPU is past its last use. Hazards (Metal 4 tracks none): "safe" puts a
+// consumer barrier at the start of every pass (the classic ordering); "precise" (default) tracks the textures written
+// and read since the last barrier and puts one only where a pass reads what an earlier one wrote, or writes what an
+// earlier one read or wrote. Completion: the queue signals the shared event with each command buffer's value.
 #pragma once
 #import <Metal/Metal.h>
+#include <algorithm>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 // Called once when the command buffer finished on the GPU: `error` nil on success, `gpu_s` the GPU time (0 unknown).
@@ -20,28 +27,95 @@ typedef void (^D9CmdDone)(NSError *error, double gpu_s);
 
 @class D9Cmd;
 
+// The Metal 4 renderer's shared state, render thread only (the pools below lock: feedback handlers return to them).
+struct D9M4State {
+    bool precise = true;   // RECOMP_METAL4_BARRIERS=safe: a barrier at the start of every pass
+    // Residency and lifetime: resource -> (strong reference, value of the last command buffer that used it).
+    id<MTLResidencySet> resident = nil;
+    std::unordered_map<const void *, std::pair<id, uint64_t>> held;
+    bool resident_dirty = false;
+    uint64_t now = 1;   // the value the open command buffer will signal
+    // Argument-table entries as last set (kind 0 vertex, 1 fragment, 2 compute); ~0 = never.
+    uint64_t addr[3][32];
+    uint64_t tex[3][32];
+    uint64_t smp[3][16];
+    // Since the last barrier: textures some pass wrote / read.
+    std::unordered_set<const void *> written, read;
+    uint64_t barriers = 0, uploaded = 0, reused = 0, table_sets = 0, table_skips = 0;
+    D9M4State() {
+        memset(addr, 0xff, sizeof addr);
+        memset(tex, 0xff, sizeof tex);
+        memset(smp, 0xff, sizeof smp);
+    }
+    void touch(id r) {
+        if (!r)
+            return;
+        auto [it, fresh] = held.try_emplace((__bridge const void *)r, r, now);
+        if (fresh) {
+            [resident addAllocation:(id<MTLAllocation>)r];
+            resident_dirty = true;
+        } else {
+            it->second.second = now;
+        }
+    }
+    // Every 256 command buffers: what was not used for that long and the GPU is past leaves the set (and is released).
+    void sweep(uint64_t completed) {
+        if (now % 256 != 0)
+            return;
+        for (auto it = held.begin(); it != held.end();) {
+            if (it->second.second + 256 < now && it->second.second <= completed) {
+                [resident removeAllocation:(id<MTLAllocation>)it->second.first];
+                resident_dirty = true;
+                it = held.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    void commit_residency() {
+        if (resident_dirty) {
+            [resident commit];
+            resident_dirty = false;
+        }
+    }
+    bool read_conflict(id r) const { return r && written.count((__bridge const void *)r); }
+    bool write_conflict(id r) const {
+        const void *p = (__bridge const void *)r;
+        return r && (written.count(p) || read.count(p));
+    }
+    void barrier_done() {
+        written.clear();
+        read.clear();
+        ++barriers;
+    }
+};
+
 // ---- the Metal 4 context: one per renderer --------------------------------------------------------------------------
 API_AVAILABLE(macos(26.0), ios(26.0))
 @interface D9M4 : NSObject
 @property(nonatomic, readonly) id<MTLDevice> device;
 @property(nonatomic, readonly) id<MTL4CommandQueue> queue;
-@property(nonatomic, readonly) id<MTL4Compiler> compiler;          // MetalFX 4 scalers
+@property(nonatomic, readonly) id<MTL4Compiler> compiler;          // MetalFX 4 scalers, flexible pipelines
 @property(nonatomic, readonly) id<MTLSharedEvent> done;            // signalled with each command buffer's value
 @property(nonatomic, readonly) id<MTLSharedEvent> presented;       // the presenter's copies (classic queue)
 @property(nonatomic, readonly) id<MTL4ArgumentTable> vtab, ftab, ctab;
+@property(nonatomic, readonly) D9M4State *st;
 // Nil (with the reason in *why) when the device or the OS has no Metal 4.
 + (instancetype)contextWithDevice:(id<MTLDevice>)device why:(NSString **)why;
 - (uint64_t)nextValue;
-// Upload chunks and allocators, recycled once the GPU passed the value they were last used with.
 - (id<MTLBuffer>)takeChunk:(NSUInteger)atLeast;
 - (void)giveChunk:(id<MTLBuffer>)chunk;
 - (id<MTL4CommandAllocator>)takeAllocator;
 - (void)giveAllocator:(id<MTL4CommandAllocator>)a;
-- (id<MTLResidencySet>)takeResidency;
-- (void)giveResidency:(id<MTLResidencySet>)r;
 // The presenter's classic command buffer copied the frame: the next Metal 4 work waits for it.
 - (uint64_t)nextPresentedValue;
 - (void)waitPresented:(uint64_t)value;
+// An object (a MetalFX scaler being replaced) the GPU may still use: kept until the work in flight is done.
+- (void)keepAlive:(id)object;
+- (uint64_t)takeUploadedBytes;   // since the last call (the perf line)
+- (uint64_t)takeBarriers;
+- (void)beforeCommit;   // render thread, each commit: the residency set's changes
+- (void)afterCommit;    // ... and the sweep of what is unused and done
 @end
 
 @interface D9RenderEnc : NSObject
@@ -141,12 +215,13 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (void)addDone:(D9CmdDone)done;   // before commit
 - (void)commit;
 - (void)waitUntilCompleted;
-// Metal 4: keep `r` alive and resident until this command buffer completes (no-op on classic Metal).
+// Metal 4: keep `r` resident and alive until the GPU is done with it (no-op on classic Metal).
 - (void)touch:(id<MTLResource>)r;
-// Metal 4: `bytes` copied into this command buffer's upload memory; its GPU address (0 on classic Metal).
-- (uint64_t)upload:(const void *)bytes length:(NSUInteger)length;
-// Metal 4: a consumer barrier on all earlier passes before an encoder the renderer makes itself (MetalFX).
-- (void)barrierBeforeForeignWork;
+// Metal 4: `bytes` in this command buffer's upload memory; its GPU address (0 on classic Metal). `slot` >= 0: the
+// same bytes as that slot's last upload in this command buffer reuse it.
+- (uint64_t)upload:(const void *)bytes length:(NSUInteger)length slot:(int)slot;
+// Metal 4: a barrier on all earlier passes before MetalFX's own work; `written`: what that work writes or reads.
+- (void)barrierBeforeForeignWork:(std::initializer_list<id<MTLTexture>>)written;
 @end
 
 // ---- classic Metal + Metal 4 ----------------------------------------------------------------------------------------
@@ -155,8 +230,10 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
 
 @implementation D9M4 {
     std::mutex mutex_;
-    NSMutableArray *chunks_, *allocators_, *residency_;
+    NSMutableArray *chunks_, *allocators_;
+    std::vector<std::pair<id, uint64_t>> kept_;
     uint64_t value_, presented_value_;
+    D9M4State st_;
 }
 + (instancetype)contextWithDevice:(id<MTLDevice>)device why:(NSString **)why {
     if (@available(macOS 26.0, iOS 26.0, *)) {
@@ -181,15 +258,23 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         m->_ctab = [device newArgumentTableWithDescriptor:ad error:&error];
         m->chunks_ = [NSMutableArray array];
         m->allocators_ = [NSMutableArray array];
-        m->residency_ = [NSMutableArray array];
-        if (!m->_queue || !m->_done || !m->_presented || !m->_vtab || !m->_ftab || !m->_ctab) {
+        MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
+        rd.initialCapacity = 2048;
+        m->st_.resident = [device newResidencySetWithDescriptor:rd error:&error];
+        const char *b = getenv("RECOMP_METAL4_BARRIERS");
+        m->st_.precise = !(b && !strcmp(b, "safe"));
+        if (!m->_queue || !m->_done || !m->_presented || !m->_vtab || !m->_ftab || !m->_ctab || !m->st_.resident) {
             *why = [NSString stringWithFormat:@"setup failed (%@)", error.localizedDescription ?: @"no queue"];
             return nil;
         }
+        [m->_queue addResidencySet:m->st_.resident];
         return m;
     }
     *why = @"this OS has no Metal 4";
     return nil;
+}
+- (D9M4State *)st {
+    return &st_;
 }
 - (uint64_t)nextValue {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -231,26 +316,6 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     if (allocators_.count < 8)
         [allocators_ addObject:a];
 }
-- (id<MTLResidencySet>)takeResidency {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (residency_.count) {
-            id<MTLResidencySet> r = residency_.lastObject;
-            [residency_ removeLastObject];
-            return r;
-        }
-    }
-    MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
-    rd.initialCapacity = 512;
-    return [_device newResidencySetWithDescriptor:rd error:nil];
-}
-- (void)giveResidency:(id<MTLResidencySet>)r {
-    [r removeAllAllocations];
-    [r commit];
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (residency_.count < 8)
-        [residency_ addObject:r];
-}
 - (uint64_t)nextPresentedValue {
     std::lock_guard<std::mutex> lock(mutex_);
     return ++presented_value_;
@@ -258,13 +323,87 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
 - (void)waitPresented:(uint64_t)value {
     [_queue waitForEvent:_presented value:value];
 }
+- (void)keepAlive:(id)object {
+    if (object)
+        kept_.emplace_back(object, st_.now);
+}
+// Render thread, at each commit: residency changes go in, and the old kept objects go.
+- (void)beforeCommit {
+    st_.commit_residency();
+}
+- (void)afterCommit {
+    const uint64_t completed = _done.signaledValue;
+    st_.sweep(completed);
+    if (!kept_.empty())
+        kept_.erase(std::remove_if(kept_.begin(), kept_.end(),
+                                   [&](const std::pair<id, uint64_t> &k) { return k.second <= completed; }),
+                    kept_.end());
+    ++st_.now;
+}
+- (uint64_t)takeUploadedBytes {
+    const uint64_t b = st_.uploaded;
+    st_.uploaded = 0;
+    return b;
+}
+- (uint64_t)takeBarriers {
+    const uint64_t b = st_.barriers;
+    st_.barriers = 0;
+    return b;
+}
 @end
+
+// Argument-table entries, set only when they change (the table keeps its value across encoders and command buffers;
+// a draw takes a snapshot of it).
+static inline void d9_set_addr(D9M4State *st, int kind, id<MTL4ArgumentTable> t, NSUInteger i, uint64_t a)
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    if (i < 32) {
+        if (st->addr[kind][i] == a) {
+            ++st->table_skips;
+            return;
+        }
+        st->addr[kind][i] = a;
+    }
+    ++st->table_sets;
+    [t setAddress:a atIndex:i];
+}
+static inline void d9_set_tex(D9M4State *st, int kind, id<MTL4ArgumentTable> t, NSUInteger i, id<MTLTexture> x)
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    const MTLResourceID r = x ? x.gpuResourceID : MTLResourceID{0};
+    uint64_t v;
+    memcpy(&v, &r, sizeof v);
+    if (i < 32) {
+        if (st->tex[kind][i] == v) {
+            ++st->table_skips;
+            return;
+        }
+        st->tex[kind][i] = v;
+    }
+    ++st->table_sets;
+    [t setTexture:r atIndex:i];
+}
+static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, NSUInteger i, id<MTLSamplerState> x)
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    const MTLResourceID r = x ? x.gpuResourceID : MTLResourceID{0};
+    uint64_t v;
+    memcpy(&v, &r, sizeof v);
+    if (i < 16) {
+        if (st->smp[kind][i] == v) {
+            ++st->table_skips;
+            return;
+        }
+        st->smp[kind][i] = v;
+    }
+    ++st->table_sets;
+    [t setSamplerState:r atIndex:i];
+}
 
 @implementation D9RenderEnc {
     id<MTLRenderCommandEncoder> c_;
     id m_;            // id<MTL4RenderCommandEncoder>
     D9Cmd *cmd_;      // Metal 4: uploads and touches
     id<MTL4ArgumentTable> vt_, ft_;
+    D9M4State *st_;
+    std::vector<const void *> writes_;   // this pass's attachments (written again after a barrier inside it)
 }
 - (instancetype)initWithClassic:(id<MTLRenderCommandEncoder>)enc {
     if (!enc)
@@ -273,8 +412,12 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         c_ = enc;
     return self;
 }
-- (instancetype)initWithM4:(id)enc cmd:(D9Cmd *)cmd vtab:(id<MTL4ArgumentTable>)vt ftab:(id<MTL4ArgumentTable>)ft
-    API_AVAILABLE(macos(26.0), ios(26.0)) {
+- (instancetype)initWithM4:(id)enc
+                       cmd:(D9Cmd *)cmd
+                      vtab:(id<MTL4ArgumentTable>)vt
+                      ftab:(id<MTL4ArgumentTable>)ft
+                     state:(D9M4State *)st
+               attachments:(const std::vector<id<MTLTexture>> &)att API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (!enc)
         return nil;
     if ((self = [super init])) {
@@ -282,10 +425,21 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         cmd_ = cmd;
         vt_ = vt;
         ft_ = ft;
+        st_ = st;
         id<MTL4RenderCommandEncoder> e = enc;
-        [e barrierAfterQueueStages:kD9AllStages
-                      beforeStages:MTLStageVertex | MTLStageFragment
-                 visibilityOptions:MTL4VisibilityOptionDevice];
+        bool need = !st->precise;
+        for (id<MTLTexture> t : att)
+            need = need || st->write_conflict(t);
+        if (need) {
+            [e barrierAfterQueueStages:kD9AllStages
+                          beforeStages:MTLStageVertex | MTLStageFragment
+                     visibilityOptions:MTL4VisibilityOptionDevice];
+            st->barrier_done();
+        }
+        for (id<MTLTexture> t : att) {
+            writes_.push_back((__bridge const void *)t);
+            st->written.insert((__bridge const void *)t);
+        }
         [e setArgumentTable:vt atStages:MTLRenderStageVertex];
         [e setArgumentTable:ft atStages:MTLRenderStageFragment];
     }
@@ -293,6 +447,22 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
 }
 - (id<MTLRenderCommandEncoder>)raw {
     return c_;
+}
+// A resource this pass reads that an earlier pass wrote since the last barrier: a barrier before the next draw.
+- (void)m4Read:(id)r texture:(bool)texture API_AVAILABLE(macos(26.0), ios(26.0)) {
+    if (!r)
+        return;
+    [cmd_ touch:r];
+    if (st_->precise && st_->read_conflict(r)) {
+        [(id<MTL4RenderCommandEncoder>)m_ barrierAfterQueueStages:kD9AllStages
+                                                      beforeStages:MTLStageVertex | MTLStageFragment
+                                                 visibilityOptions:MTL4VisibilityOptionDevice];
+        st_->barrier_done();
+        for (const void *w : writes_)
+            st_->written.insert(w);
+    }
+    if (texture)
+        st_->read.insert((__bridge const void *)r);
 }
 #define D9_M4(stmt)                                                                                                    \
     if (m_) {                                                                                                          \
@@ -347,35 +517,35 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     [c_ setVisibilityResultMode:mode offset:offset];
 }
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
-    D9_M4((void)e; [vt_ setAddress:[cmd_ upload:bytes length:length] atIndex:index]);
+    D9_M4((void)e; d9_set_addr(st_, 0, vt_, index, [cmd_ upload:bytes length:length slot:(int)index]));
     [c_ setVertexBytes:bytes length:length atIndex:index];
 }
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
-    D9_M4((void)e; [ft_ setAddress:[cmd_ upload:bytes length:length] atIndex:index]);
+    D9_M4((void)e; d9_set_addr(st_, 1, ft_, index, [cmd_ upload:bytes length:length slot:32 + (int)index]));
     [c_ setFragmentBytes:bytes length:length atIndex:index];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    D9_M4((void)e; [cmd_ touch:b]; [vt_ setAddress:b ? b.gpuAddress + offset : 0 atIndex:index]);
+    D9_M4((void)e; [self m4Read:b texture:false]; d9_set_addr(st_, 0, vt_, index, b ? b.gpuAddress + offset : 0));
     [c_ setVertexBuffer:b offset:offset atIndex:index];
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    D9_M4((void)e; [cmd_ touch:b]; [ft_ setAddress:b ? b.gpuAddress + offset : 0 atIndex:index]);
+    D9_M4((void)e; [self m4Read:b texture:false]; d9_set_addr(st_, 1, ft_, index, b ? b.gpuAddress + offset : 0));
     [c_ setFragmentBuffer:b offset:offset atIndex:index];
 }
 - (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index {
-    D9_M4((void)e; [cmd_ touch:t]; [vt_ setTexture:t ? t.gpuResourceID : MTLResourceID{0} atIndex:index]);
+    D9_M4((void)e; [self m4Read:t texture:true]; d9_set_tex(st_, 0, vt_, index, t));
     [c_ setVertexTexture:t atIndex:index];
 }
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index {
-    D9_M4((void)e; [cmd_ touch:t]; [ft_ setTexture:t ? t.gpuResourceID : MTLResourceID{0} atIndex:index]);
+    D9_M4((void)e; [self m4Read:t texture:true]; d9_set_tex(st_, 1, ft_, index, t));
     [c_ setFragmentTexture:t atIndex:index];
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)index {
-    D9_M4((void)e; [vt_ setSamplerState:s ? s.gpuResourceID : MTLResourceID{0} atIndex:index]);
+    D9_M4((void)e; d9_set_smp(st_, 0, vt_, index, s));
     [c_ setVertexSamplerState:s atIndex:index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)index {
-    D9_M4((void)e; [ft_ setSamplerState:s ? s.gpuResourceID : MTLResourceID{0} atIndex:index]);
+    D9_M4((void)e; d9_set_smp(st_, 1, ft_, index, s));
     [c_ setFragmentSamplerState:s atIndex:index];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)type vertexStart:(NSUInteger)start vertexCount:(NSUInteger)count {
@@ -394,11 +564,11 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
                     indexType:(MTLIndexType)itype
                   indexBuffer:(id<MTLBuffer>)ib
             indexBufferOffset:(NSUInteger)offset {
-    D9_M4([cmd_ touch:ib]; [e drawIndexedPrimitives:type
-                                         indexCount:count
-                                          indexType:itype
-                                        indexBuffer:ib.gpuAddress + offset
-                                  indexBufferLength:ib.length - offset]);
+    D9_M4([self m4Read:ib texture:false]; [e drawIndexedPrimitives:type
+                                                         indexCount:count
+                                                          indexType:itype
+                                                        indexBuffer:ib.gpuAddress + offset
+                                                  indexBufferLength:ib.length - offset]);
     [c_ drawIndexedPrimitives:type indexCount:count indexType:itype indexBuffer:ib indexBufferOffset:offset];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)type
@@ -409,14 +579,14 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
                 instanceCount:(NSUInteger)instances
                    baseVertex:(NSInteger)baseVertex
                  baseInstance:(NSUInteger)baseInstance {
-    D9_M4([cmd_ touch:ib]; [e drawIndexedPrimitives:type
-                                         indexCount:count
-                                          indexType:itype
-                                        indexBuffer:ib.gpuAddress + offset
-                                  indexBufferLength:ib.length - offset
-                                      instanceCount:instances
-                                         baseVertex:baseVertex
-                                       baseInstance:baseInstance]);
+    D9_M4([self m4Read:ib texture:false]; [e drawIndexedPrimitives:type
+                                                         indexCount:count
+                                                          indexType:itype
+                                                        indexBuffer:ib.gpuAddress + offset
+                                                  indexBufferLength:ib.length - offset
+                                                      instanceCount:instances
+                                                         baseVertex:baseVertex
+                                                       baseInstance:baseInstance]);
     [c_ drawIndexedPrimitives:type
                    indexCount:count
                     indexType:itype
@@ -438,6 +608,7 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     id<MTLBlitCommandEncoder> c_;
     id m_;   // id<MTL4ComputeCommandEncoder>
     D9Cmd *cmd_;
+    D9M4State *st_;
 }
 - (instancetype)initWithClassic:(id<MTLBlitCommandEncoder>)enc {
     if (!enc)
@@ -446,17 +617,36 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         c_ = enc;
     return self;
 }
-- (instancetype)initWithM4:(id)enc cmd:(D9Cmd *)cmd API_AVAILABLE(macos(26.0), ios(26.0)) {
+- (instancetype)initWithM4:(id)enc cmd:(D9Cmd *)cmd state:(D9M4State *)st API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (!enc)
         return nil;
     if ((self = [super init])) {
         m_ = enc;
         cmd_ = cmd;
-        [(id<MTL4ComputeCommandEncoder>)enc barrierAfterQueueStages:kD9AllStages
-                                                        beforeStages:MTLStageBlit
-                                                   visibilityOptions:MTL4VisibilityOptionDevice];
+        st_ = st;
+        if (!st->precise) {
+            [(id<MTL4ComputeCommandEncoder>)enc barrierAfterQueueStages:kD9AllStages
+                                                            beforeStages:MTLStageBlit
+                                                       visibilityOptions:MTL4VisibilityOptionDevice];
+            st->barrier_done();
+        }
     }
     return self;
+}
+// A copy reads `src` and writes `dst`: a barrier first if an earlier pass wrote src, or read or wrote dst.
+- (void)m4Copy:(id)src to:(id)dst API_AVAILABLE(macos(26.0), ios(26.0)) {
+    [cmd_ touch:src];
+    [cmd_ touch:dst];
+    if (st_->precise && (st_->read_conflict(src) || st_->write_conflict(dst))) {
+        [(id<MTL4ComputeCommandEncoder>)m_ barrierAfterQueueStages:kD9AllStages
+                                                       beforeStages:MTLStageBlit
+                                                  visibilityOptions:MTL4VisibilityOptionDevice];
+        st_->barrier_done();
+    }
+    if (src)
+        st_->read.insert((__bridge const void *)src);
+    if (dst)
+        st_->written.insert((__bridge const void *)dst);
 }
 #define D9_M4(stmt)                                                                                                    \
     if (m_) {                                                                                                          \
@@ -475,15 +665,15 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
            destinationOffset:(NSUInteger)offset
       destinationBytesPerRow:(NSUInteger)row
     destinationBytesPerImage:(NSUInteger)image {
-    D9_M4([cmd_ touch:src]; [cmd_ touch:dst]; [e copyFromTexture:src
-                                                      sourceSlice:slice
-                                                      sourceLevel:level
-                                                     sourceOrigin:origin
-                                                       sourceSize:size
-                                                         toBuffer:dst
-                                                destinationOffset:offset
-                                           destinationBytesPerRow:row
-                                         destinationBytesPerImage:image]);
+    D9_M4([self m4Copy:src to:dst]; [e copyFromTexture:src
+                                            sourceSlice:slice
+                                            sourceLevel:level
+                                           sourceOrigin:origin
+                                             sourceSize:size
+                                               toBuffer:dst
+                                      destinationOffset:offset
+                                 destinationBytesPerRow:row
+                               destinationBytesPerImage:image]);
     [c_ copyFromTexture:src
                      sourceSlice:slice
                      sourceLevel:level
@@ -503,15 +693,15 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         destinationSlice:(NSUInteger)dslice
         destinationLevel:(NSUInteger)dlevel
        destinationOrigin:(MTLOrigin)dorigin {
-    D9_M4([cmd_ touch:src]; [cmd_ touch:dst]; [e copyFromTexture:src
-                                                      sourceSlice:slice
-                                                      sourceLevel:level
-                                                     sourceOrigin:origin
-                                                       sourceSize:size
-                                                        toTexture:dst
-                                                 destinationSlice:dslice
-                                                 destinationLevel:dlevel
-                                                destinationOrigin:dorigin]);
+    D9_M4([self m4Copy:src to:dst]; [e copyFromTexture:src
+                                            sourceSlice:slice
+                                            sourceLevel:level
+                                           sourceOrigin:origin
+                                             sourceSize:size
+                                              toTexture:dst
+                                       destinationSlice:dslice
+                                       destinationLevel:dlevel
+                                      destinationOrigin:dorigin]);
     [c_ copyFromTexture:src
             sourceSlice:slice
             sourceLevel:level
@@ -531,15 +721,15 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
        destinationSlice:(NSUInteger)dslice
        destinationLevel:(NSUInteger)dlevel
       destinationOrigin:(MTLOrigin)dorigin {
-    D9_M4([cmd_ touch:src]; [cmd_ touch:dst]; [e copyFromBuffer:src
-                                                    sourceOffset:offset
-                                               sourceBytesPerRow:row
-                                             sourceBytesPerImage:image
-                                                      sourceSize:size
-                                                       toTexture:dst
-                                                destinationSlice:dslice
-                                                destinationLevel:dlevel
-                                               destinationOrigin:dorigin]);
+    D9_M4([self m4Copy:src to:dst]; [e copyFromBuffer:src
+                                          sourceOffset:offset
+                                     sourceBytesPerRow:row
+                                   sourceBytesPerImage:image
+                                            sourceSize:size
+                                             toTexture:dst
+                                      destinationSlice:dslice
+                                      destinationLevel:dlevel
+                                     destinationOrigin:dorigin]);
     [c_ copyFromBuffer:src
                sourceOffset:offset
           sourceBytesPerRow:row
@@ -562,6 +752,8 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     id m_;   // id<MTL4ComputeCommandEncoder>
     D9Cmd *cmd_;
     id<MTL4ArgumentTable> t_;
+    D9M4State *st_;
+    std::vector<const void *> writes_;   // what this dispatch's kernel may write (every bound resource)
 }
 - (instancetype)initWithClassic:(id<MTLComputeCommandEncoder>)enc {
     if (!enc)
@@ -570,7 +762,7 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         c_ = enc;
     return self;
 }
-- (instancetype)initWithM4:(id)enc cmd:(D9Cmd *)cmd table:(id<MTL4ArgumentTable>)t
+- (instancetype)initWithM4:(id)enc cmd:(D9Cmd *)cmd table:(id<MTL4ArgumentTable>)t state:(D9M4State *)st
     API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (!enc)
         return nil;
@@ -578,11 +770,31 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         m_ = enc;
         cmd_ = cmd;
         t_ = t;
+        st_ = st;
         id<MTL4ComputeCommandEncoder> e = enc;
-        [e barrierAfterQueueStages:kD9AllStages beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        if (!st->precise) {
+            [e barrierAfterQueueStages:kD9AllStages beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            st->barrier_done();
+        }
         [e setArgumentTable:t];
     }
     return self;
+}
+// A kernel's resource: read and maybe written (a kernel says neither), so both conflicts count.
+- (void)m4Bind:(id)r API_AVAILABLE(macos(26.0), ios(26.0)) {
+    if (!r)
+        return;
+    [cmd_ touch:r];
+    if (st_->precise && st_->write_conflict(r)) {
+        [(id<MTL4ComputeCommandEncoder>)m_ barrierAfterQueueStages:kD9AllStages
+                                                       beforeStages:MTLStageDispatch
+                                                  visibilityOptions:MTL4VisibilityOptionDevice];
+        st_->barrier_done();
+        for (const void *w : writes_)
+            st_->written.insert(w);
+    }
+    writes_.push_back((__bridge const void *)r);
+    st_->written.insert((__bridge const void *)r);
 }
 #define D9_M4(stmt)                                                                                                    \
     if (m_) {                                                                                                          \
@@ -597,15 +809,15 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     [c_ setComputePipelineState:p];
 }
 - (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index {
-    D9_M4((void)e; [cmd_ touch:t]; [t_ setTexture:t ? t.gpuResourceID : MTLResourceID{0} atIndex:index]);
+    D9_M4((void)e; [self m4Bind:t]; d9_set_tex(st_, 2, t_, index, t));
     [c_ setTexture:t atIndex:index];
 }
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)index {
-    D9_M4((void)e; [cmd_ touch:b]; [t_ setAddress:b ? b.gpuAddress + offset : 0 atIndex:index]);
+    D9_M4((void)e; [self m4Bind:b]; d9_set_addr(st_, 2, t_, index, b ? b.gpuAddress + offset : 0));
     [c_ setBuffer:b offset:offset atIndex:index];
 }
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
-    D9_M4((void)e; [t_ setAddress:[cmd_ upload:bytes length:length] atIndex:index]);
+    D9_M4((void)e; d9_set_addr(st_, 2, t_, index, [cmd_ upload:bytes length:length slot:64 + (int)index]));
     [c_ setBytes:bytes length:length atIndex:index];
 }
 - (void)dispatchThreadgroups:(MTLSize)groups threadsPerThreadgroup:(MTLSize)threads {
@@ -623,15 +835,20 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     id<MTLCommandBuffer> c_;
     // Metal 4
     D9M4 *ctx_;
+    D9M4State *st_;
     id buf_;                     // id<MTL4CommandBuffer>
     id alloc_;                   // id<MTL4CommandAllocator>
-    id<MTLResidencySet> res_;
-    NSMutableSet *held_;         // every resource the GPU work touches, until it completes
     NSMutableArray *chunks_;     // upload memory, until it completes
     id<MTLBuffer> chunk_;
     NSUInteger used_;
     NSMutableArray<D9CmdDone> *done_;
     uint64_t value_;
+    // the last upload per slot (vertex 0-31, fragment 32-63, compute 64-95) in this command buffer
+    struct LastUpload {
+        const uint8_t *at = nullptr;
+        NSUInteger length = 0;
+        uint64_t address = 0;
+    } last_[96];
 }
 - (instancetype)initWithQueue:(id<MTLCommandQueue>)queue {
     id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -645,14 +862,13 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     if (!(self = [super init]))
         return nil;
     ctx_ = m4;
+    st_ = m4.st;
     alloc_ = [m4 takeAllocator];
     id<MTL4CommandBuffer> cb = [m4.device newCommandBuffer];
     if (!cb || !alloc_)
         return nil;
     [cb beginCommandBufferWithAllocator:alloc_];
     buf_ = cb;
-    res_ = [m4 takeResidency];
-    held_ = [NSMutableSet setWithCapacity:256];
     chunks_ = [NSMutableArray array];
     done_ = [NSMutableArray array];
     return self;
@@ -667,22 +883,33 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     return value_;
 }
 - (void)touch:(id<MTLResource>)r {
-    if (buf_ && r)
-        [held_ addObject:r];
+    if (buf_)
+        st_->touch(r);
 }
-- (uint64_t)upload:(const void *)bytes length:(NSUInteger)length {
+- (uint64_t)upload:(const void *)bytes length:(NSUInteger)length slot:(int)slot {
     if (!buf_)
         return 0;
+    if (slot >= 0 && slot < 96) {   // the same bytes again (most draws share their camera / parameter blocks)
+        const LastUpload &l = last_[slot];
+        if (l.at && l.length == length && !memcmp(l.at, bytes, length)) {
+            ++st_->reused;
+            return l.address;
+        }
+    }
     const NSUInteger n = (length + 255) & ~(NSUInteger)255;   // constant buffer offsets: 256-byte aligned (safe)
     if (!chunk_ || used_ + n > chunk_.length) {
         chunk_ = [ctx_ takeChunk:n];
         used_ = 0;
         [chunks_ addObject:chunk_];
-        [held_ addObject:chunk_];
+        st_->touch(chunk_);
     }
-    memcpy((uint8_t *)chunk_.contents + used_, bytes, length);
+    uint8_t *at = (uint8_t *)chunk_.contents + used_;
+    memcpy(at, bytes, length);
+    st_->uploaded += length;
     const uint64_t a = chunk_.gpuAddress + used_;
     used_ += n;
+    if (slot >= 0 && slot < 96)
+        last_[slot] = {at, length, a};
     return a;
 }
 - (D9RenderEnc *)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)rp {
@@ -690,32 +917,38 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         return [[D9RenderEnc alloc] initWithClassic:[c_ renderCommandEncoderWithDescriptor:rp]];
     if (@available(macOS 26.0, iOS 26.0, *)) {
         MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new];
+        std::vector<id<MTLTexture>> att;
         for (NSUInteger i = 0; i < 8; ++i) {
             MTLRenderPassColorAttachmentDescriptor *a = rp.colorAttachments[i];
             if (!a.texture)
                 continue;
             d.colorAttachments[i] = [a copy];
-            [self touch:a.texture];
-            [self touch:a.resolveTexture];
+            st_->touch(a.texture);
+            att.push_back(a.texture);
+            if (a.resolveTexture) {
+                st_->touch(a.resolveTexture);
+                att.push_back(a.resolveTexture);
+            }
         }
         if (rp.depthAttachment.texture) {
             d.depthAttachment = [rp.depthAttachment copy];
-            [self touch:rp.depthAttachment.texture];
+            st_->touch(rp.depthAttachment.texture);
+            att.push_back(rp.depthAttachment.texture);
         }
         if (rp.stencilAttachment.texture) {
             d.stencilAttachment = [rp.stencilAttachment copy];
-            [self touch:rp.stencilAttachment.texture];
+            st_->touch(rp.stencilAttachment.texture);
         }
         if (rp.visibilityResultBuffer) {
             d.visibilityResultBuffer = rp.visibilityResultBuffer;
-            [self touch:rp.visibilityResultBuffer];
+            st_->touch(rp.visibilityResultBuffer);
         }
         if (rp.renderTargetWidth)
             d.renderTargetWidth = rp.renderTargetWidth;
         if (rp.renderTargetHeight)
             d.renderTargetHeight = rp.renderTargetHeight;
         id<MTL4RenderCommandEncoder> e = [(id<MTL4CommandBuffer>)buf_ renderCommandEncoderWithDescriptor:d];
-        return [[D9RenderEnc alloc] initWithM4:e cmd:self vtab:ctx_.vtab ftab:ctx_.ftab];
+        return [[D9RenderEnc alloc] initWithM4:e cmd:self vtab:ctx_.vtab ftab:ctx_.ftab state:st_ attachments:att];
     }
     return nil;
 }
@@ -723,7 +956,7 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     if (!buf_)
         return [[D9BlitEnc alloc] initWithClassic:[c_ blitCommandEncoder]];
     if (@available(macOS 26.0, iOS 26.0, *))
-        return [[D9BlitEnc alloc] initWithM4:[(id<MTL4CommandBuffer>)buf_ computeCommandEncoder] cmd:self];
+        return [[D9BlitEnc alloc] initWithM4:[(id<MTL4CommandBuffer>)buf_ computeCommandEncoder] cmd:self state:st_];
     return nil;
 }
 - (D9ComputeEnc *)computeCommandEncoder {
@@ -732,16 +965,23 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     if (@available(macOS 26.0, iOS 26.0, *))
         return [[D9ComputeEnc alloc] initWithM4:[(id<MTL4CommandBuffer>)buf_ computeCommandEncoder]
                                             cmd:self
-                                          table:ctx_.ctab];
+                                          table:ctx_.ctab
+                                          state:st_];
     return nil;
 }
-- (void)barrierBeforeForeignWork {
+- (void)barrierBeforeForeignWork:(std::initializer_list<id<MTLTexture>>)written {
     if (!buf_)
         return;
     if (@available(macOS 26.0, iOS 26.0, *)) {
         id<MTL4ComputeCommandEncoder> e = [(id<MTL4CommandBuffer>)buf_ computeCommandEncoder];
         [e barrierAfterQueueStages:kD9AllStages beforeStages:kD9AllStages visibilityOptions:MTL4VisibilityOptionDevice];
         [e endEncoding];
+        st_->barrier_done();
+        for (id<MTLTexture> t : written) {   // MetalFX reads and writes these: the next pass that uses one waits
+            st_->touch(t);
+            if (t)
+                st_->written.insert((__bridge const void *)t);
+        }
     }
 }
 - (void)addDone:(D9CmdDone)done {
@@ -760,18 +1000,13 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
     }
     if (@available(macOS 26.0, iOS 26.0, *)) {
         id<MTL4CommandBuffer> cb = buf_;
-        for (id<MTLAllocation> r in held_)
-            [res_ addAllocation:r];
-        [res_ commit];
-        [cb useResidencySet:res_];   // between begin and end (validation)
         [cb endCommandBuffer];
+        [ctx_ beforeCommit];   // the queue's residency set (new resources since the last commit)
         // The feedback handler runs once the GPU finished: it reports, then gives the memory back.
         D9M4 *ctx = ctx_;
         NSArray<D9CmdDone> *done = [done_ copy];
-        NSMutableSet *held = held_;
         NSArray *chunks = [chunks_ copy];
         id alloc = alloc_;
-        id<MTLResidencySet> res = res_;
         MTL4CommitOptions *opts = [MTL4CommitOptions new];
         [opts addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
           const double gpu = fb.GPUEndTime > fb.GPUStartTime ? fb.GPUEndTime - fb.GPUStartTime : 0.0;
@@ -780,20 +1015,18 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
           for (id<MTLBuffer> b in chunks)
               [ctx giveChunk:b];
           [ctx giveAllocator:alloc];
-          [ctx giveResidency:res];
-          [held removeAllObjects];
         }];
         id<MTL4CommandBuffer> list[1] = {cb};
         // The value at commit, not at creation: a command buffer made and committed while another is open (the
         // renderer's one-off ones) would otherwise signal out of order, the event would go back, and a wait hang.
         value_ = [ctx_ nextValue];
+        st_->now = value_;
         [ctx_.queue commit:list count:1 options:opts];
         [ctx_.queue signalEvent:ctx_.done value:value_];
-        held_ = nil;
+        [ctx_ afterCommit];
         chunks_ = nil;
         chunk_ = nil;
         alloc_ = nil;
-        res_ = nil;
         done_ = nil;
     }
 }
