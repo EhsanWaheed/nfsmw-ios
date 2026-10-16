@@ -1617,7 +1617,9 @@ void ios_overlay_apply_launch_settings() {
     // The game's resolution (main.cpp note_screen_size reads it before the game boots).
     // Effects (glow, depth of field, motion blur) at the 3D resolution is the default: on an iPhone it saves GPU
     // time at no visible cost (owner, 12 Oct).
-    [d registerDefaults:@{kOutput : @(kDefaultOutput), kEffects : @YES}];
+    // metal4 TEST BRANCH ONLY (revert before a public release): Metal 4 and the Temporal upscaler on by default, so
+    // each test install (a new LiveContainer data folder, the settings gone) needs no restarts to get there.
+    [d registerDefaults:@{kOutput : @(kDefaultOutput), kEffects : @YES, kMetal4 : @YES, kTemporal : @YES}];
     g_launch_output = (int)[d integerForKey:kOutput];
     if ([d boolForKey:kEffects])
         setenv("RECOMP_UPSCALE_EFFECTS_INTERNAL", "1", 0);

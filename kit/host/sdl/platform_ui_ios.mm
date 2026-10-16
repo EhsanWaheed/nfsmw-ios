@@ -100,6 +100,15 @@ void platform_ui_ios_prepare() {
     setenv("RECOMP_D3D9_SCALE", "1", 0);
     setenv("RECOMP_HOST_PRESENT_PACING", "duration", 0);
     setenv("RECOMP_D3D9_SHADER_WARM_DIR", (profile / "ShaderWarm").c_str(), 0);
+    // A read-only shader seed in the bundle (the private test build only: recorded from a played profile), so a fresh
+    // install (LiveContainer gives each install a new data folder) starts with a warm shader cache.
+    {
+        NSString *seed = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"ShaderWarmSeed"];
+        if ([NSFileManager.defaultManager fileExistsAtPath:[seed stringByAppendingPathComponent:@"order.txt"]]) {
+            setenv("RECOMP_D3D9_SHADER_WARM_SEED", seed.UTF8String, 0);
+            fprintf(stderr, "[ios] shader seed: bundled\n");
+        }
+    }
     ios_overlay_apply_launch_settings(); // MetalFX markers, and the overlay's restart-only options
 }
 
