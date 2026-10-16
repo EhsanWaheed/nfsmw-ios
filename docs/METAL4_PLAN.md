@@ -6,7 +6,8 @@ Goal: the Direct3D 9 renderer (`kit/host/gpu/metal/d3d9_metal.mm`) encodes on a 
 
 ## Switch
 
-Diagnostics → *Renderer*: **Metal** (default) / **Metal 4 (experimental)**, next launch (`RECOMP_METAL4=1`). The
+Diagnostics → *Renderer*: **Metal 4** (default since 17 Oct 2026) / **Metal (compatibility)**, next launch
+(`RECOMP_METAL4=1`). The
 Metal 4 path is used only when the device supports it (`supportsFamily:MTLGPUFamilyMetal4`); otherwise the classic
 path runs and the log says why. Any stage can be turned off again with the switch, with no reinstall.
 

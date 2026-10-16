@@ -276,7 +276,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 @property(nonatomic) NSArray<UISwitch *> *diag; // the reflection test: tag = its host_d9_diag_set bit, never saved
 @property(nonatomic) UIStackView *diagView;      // the Diagnostics tab
 @property(nonatomic) UISegmentedControl *upscaler; // v2.5: Spatial / Temporal (experimental), next launch
-@property(nonatomic) UISegmentedControl *renderer; // v4: Metal / Metal 4 (experimental), next launch
+@property(nonatomic) UISegmentedControl *renderer; // v4: Metal 4 (default) / Metal (compatibility), next launch
 @property(nonatomic) UISegmentedControl *barriers; // v4: Metal 4 barriers Precise / Safe, next launch
 @property(nonatomic) UIView *notice; // the restart notice
 @property(nonatomic) CADisplayLink *rateHint; // carries the ProMotion frame-rate range
@@ -667,8 +667,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.dynamic = [self switchFor:kDynamic action:@selector(dynamicChanged:)];
     self.effects = [self switchFor:kEffects action:@selector(effectsChanged:)];
     self.status = [self note:@""];
-    self.renderer = [[UISegmentedControl alloc] initWithItems:@[ @"Metal", @"Metal 4 (experimental)" ]];
-    self.renderer.selectedSegmentIndex = [defaults() boolForKey:kMetal4] ? 1 : 0;
+    // v4: Metal 4 is the default; classic Metal stays as the compatibility choice
+    self.renderer = [[UISegmentedControl alloc] initWithItems:@[ @"Metal 4", @"Metal (compatibility)" ]];
+    self.renderer.selectedSegmentIndex = [defaults() boolForKey:kMetal4] ? 0 : 1;
     self.barriers = [[UISegmentedControl alloc] initWithItems:@[ @"Precise", @"Safe" ]];
     self.barriers.selectedSegmentIndex = [defaults() boolForKey:kM4Safe] ? 1 : 0;
     [self.barriers addTarget:self action:@selector(barriersChanged:) forControlEvents:UIControlEventValueChanged];
@@ -779,9 +780,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     ];
     self.diagView = [[UIStackView alloc] initWithArrangedSubviews:@[
         [self section:@"Renderer (next launch)"],
-        [self note:@"Metal 4 (experimental): the game's drawing goes through Apple's newest graphics interface, with "
-                   @"MetalFX 4 for the upscaler. Metal is the tested one. If anything looks wrong or freezes, switch "
-                   @"back here and restart."],
+        [self note:@"Metal 4 (default): the game's drawing goes through Apple's newest graphics interface, with "
+                   @"MetalFX 4 for the upscaler. Metal (compatibility) is the previous renderer: if anything looks "
+                   @"wrong or freezes, switch to it here and restart."],
         self.renderer,
         [self note:@"Metal 4 barriers: Precise lets the GPU overlap work that doesn't depend on each other (faster, "
                    @"cooler). Safe makes every step wait for the one before, as before. If one effect flickers or shows "
@@ -1310,7 +1311,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     host_upscale_temporal_show_motion(s.on ? 1 : 0);
 }
 - (void)rendererChanged:(UISegmentedControl *)c {
-    const BOOL m4 = c.selectedSegmentIndex == 1;
+    const BOOL m4 = c.selectedSegmentIndex == 0;
     [defaults() setBool:m4 forKey:kMetal4];
     fprintf(stderr, "[ios] overlay: renderer %s (restart to apply)\n", m4 ? "Metal 4" : "Metal");
     [self showRestartNoticeTitle:m4 ? @"Metal 4 renderer is on" : @"Metal renderer is on"
@@ -1659,7 +1660,7 @@ void ios_overlay_apply_launch_settings() {
     fprintf(stderr, "[ios] launch options: output %s%d rows, effects at internal resolution %s, upscaler %s\n",
             g_launch_output > 0 ? "" : "the screen's, ", g_launch_output, [d boolForKey:kEffects] ? "ON (test)" : "off",
             [d boolForKey:kTemporal] ? "temporal (experimental)" : "spatial");
-    fprintf(stderr, "[ios] launch options: renderer %s\n", [d boolForKey:kMetal4] ? "Metal 4 (experimental)" : "Metal");
+    fprintf(stderr, "[ios] launch options: renderer %s\n", [d boolForKey:kMetal4] ? "Metal 4" : "Metal (compatibility)");
 }
 
 void ios_overlay_install(SDL_Window *window) {
