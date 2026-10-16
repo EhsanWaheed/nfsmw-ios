@@ -5711,29 +5711,29 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // flag is 0 and the camera pass fills it. The motion vertex half runs its body again on those constants.
     void tmp_bind(const HostD9Draw &d, uint64_t vs_key, const d9sh::Program &) {
         ++tmp_.draws;
-        const uint32_t n = std::min<uint32_t>(d.vconst ? d.vconst_count : 0u, 256u);   // setVertexBytes: 4 KB at most
+        // The constants exactly as this draw binds them (set_constants just built them: padded to what the program
+        // reads, its own defs in place), so the second run never reads past the end. v4: on Metal 4 a read past the
+        // end found the next upload in the shared chunk (another draw's data): wild motion, MetalFX smears.
+        const size_t floats = std::min<size_t>(constants_.size(), 1024u);   // setVertexBytes: 4 KB at most
         uint64_t id = mix(vs_key, (uint64_t)d.stream[0].buffer << 32 | d.stream[0].offset);
         id = mix(id, (uint64_t)d.index_buffer << 32 | d.start);
         id = mix(id, (uint64_t)(uint32_t)d.base_vertex << 32 | d.primitive_count);
         id = mix(id, (uint64_t)d.primitive << 32 | (d.stream[0].buffer ? 0u : d.inline_bytes));
         id = mix(id, tmp_.occ[id]++);
         float known[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        const float *prev = zero;
-        size_t prev_bytes = sizeof zero;
+        const float *prev = constants_.data();   // unknown: this frame's (the flag keeps them unused)
         auto pv = tmp_.prev.find(id);
-        if (n && pv != tmp_.prev.end() && pv->second.c.size() == (size_t)n * 4) {
+        if (floats && pv != tmp_.prev.end() && pv->second.c.size() == floats) {
             prev = pv->second.c.data();
-            prev_bytes = (size_t)n * 16;
             known[0] = 1.0f;
             ++tmp_.known;
         } else {
             ++tmp_.fresh;
         }
-        [enc_ setVertexBytes:prev length:prev_bytes atIndex:20];
+        [enc_ setVertexBytes:prev length:floats * sizeof(float) atIndex:20];
         [enc_ setVertexBytes:known length:sizeof known atIndex:21];
-        if (n)
-            tmp_.cur[id].c.assign(d.vconst, d.vconst + (size_t)n * 4);
+        if (floats)
+            tmp_.cur[id].c.assign(constants_.data(), constants_.data() + floats);
     }
     // TEST: what draws flat (no depth test) inside the scene, by label (the first 16 kinds, logged once each).
     void tmp_note_flat(const HostD9Draw &d) {
