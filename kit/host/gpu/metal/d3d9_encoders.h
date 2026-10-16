@@ -59,10 +59,10 @@ struct D9M4State {
         memset(addr, 0xff, sizeof addr);
         memset(tex, 0xff, sizeof tex);
         memset(smp, 0xff, sizeof smp);
-        slots.resize(1u << 16);
+        slots.resize(1u << 12);
         mask = slots.size() - 1;
     }
-    size_t home(const void *k) const { return (size_t)(((uintptr_t)k >> 4) * 0x9E3779B97F4A7C15ull >> 20) & mask; }
+    size_t home(const void *k) const { return (size_t)(((uintptr_t)k >> 4) * 0x9E3779B97F4A7C15ull >> 32) & mask; }
     Slot *find(const void *k) {
         for (size_t i = home(k);; i = (i + 1) & mask) {
             Slot &x = slots[i];
@@ -115,24 +115,41 @@ struct D9M4State {
     // At each commit: every 8 command buffers what the GPU is past and the last 2 did not use leaves (released);
     // the table grows at half full. (Holding for 256 kept every buffer the game replaces each frame alive for ~4 s:
     // 3 GB on the owner's phone.)
+    // `lag`: how far a use's recorded value can trail the value its command buffer committed with (a one-off command
+    // buffer committed while the frame's was open moves the frame's value on): a resource leaves only once the GPU is
+    // past that too. v4: the table starts at 4096 (the owner's races hold ~1,500) and loses entries in place
+    // (backward shift), so a sweep scans a few thousand slots and rebuilds nothing (65,536 + rebuild: ~1 ms).
+    uint64_t lag = 0;
+    void erase_at(size_t i) {   // linear probing: pull later entries of the run back into the hole
+        slots[i].key = nullptr;
+        slots[i].obj = nil;
+        --count;
+        for (size_t j = (i + 1) & mask; slots[j].key; j = (j + 1) & mask) {
+            const size_t h = home(slots[j].key);
+            // slots[j] may move to i only if its home is not in (i, j] (cyclically)
+            if (i <= j ? (h <= i || h > j) : (h <= i && h > j)) {
+                slots[i] = std::move(slots[j]);
+                slots[j].key = nullptr;
+                slots[j].obj = nil;
+                i = j;
+            }
+        }
+    }
     void sweep(uint64_t completed) {
         if (count * 2 > slots.size())
             rebuild(slots.size() * 2);
         if (now % 8 != 0)
             return;
-        bool removed = false;
-        for (Slot &x : slots)
-            if (x.key && x.last + 2 < now && x.last <= completed) {
+        for (size_t i = 0; i < slots.size();) {
+            Slot &x = slots[i];
+            if (x.key && x.last + 2 < now && x.last + lag <= completed) {
                 [resident removeAllocation:(id<MTLAllocation>)x.obj];
                 ++res_removes;
-                x.key = nullptr;
-                x.obj = nil;
-                --count;
-                removed = true;
+                resident_dirty = true;
+                erase_at(i);   // slot i may now hold a moved entry: look at it again
+                continue;
             }
-        if (removed) {
-            resident_dirty = true;
-            rebuild(slots.size());
+            ++i;
         }
     }
     void commit_residency() {
@@ -942,11 +959,13 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
     NSUInteger used_;
     NSMutableArray<D9CmdDone> *done_;
     uint64_t value_;
+    uint64_t opened_;            // st_->now when this one began (its uses record that or later)
     // the last upload per slot (vertex 0-31, fragment 32-63, compute 64-95) in this command buffer
+    // (the bytes kept here: reading them back from the write-combined chunk cost ~1 ms a frame)
     struct LastUpload {
-        const uint8_t *at = nullptr;
-        NSUInteger length = 0;
+        NSUInteger length = 0;   // 0: none
         uint64_t address = 0;
+        uint8_t bytes[256];
     } last_[96];
 }
 - (instancetype)initWithQueue:(id<MTLCommandQueue>)queue {
@@ -968,6 +987,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         return nil;
     [cb beginCommandBufferWithAllocator:alloc_];
     buf_ = cb;
+    opened_ = st_->now;
     chunks_ = [NSMutableArray array];
     done_ = [NSMutableArray array];
     return self;
@@ -994,7 +1014,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         slot = -1;
     if (slot >= 0 && slot < 96) {
         const LastUpload &l = last_[slot];
-        if (l.at && l.length == length && !memcmp(l.at, bytes, length)) {
+        if (l.length == length && !memcmp(l.bytes, bytes, length)) {
             ++st_->reused;
             return l.address;
         }
@@ -1011,8 +1031,12 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
     st_->uploaded += length;
     const uint64_t a = chunk_.gpuAddress + used_;
     used_ += n;
-    if (slot >= 0 && slot < 96)
-        last_[slot] = {at, length, a};
+    if (slot >= 0 && slot < 96 && length) {
+        LastUpload &l = last_[slot];
+        l.length = length;
+        l.address = a;
+        memcpy(l.bytes, bytes, length);
+    }
     return a;
 }
 - (D9RenderEnc *)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)rp {
@@ -1122,6 +1146,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         // The value at commit, not at creation: a command buffer made and committed while another is open (the
         // renderer's one-off ones) would otherwise signal out of order, the event would go back, and a wait hang.
         value_ = [ctx_ nextValue];
+        st_->lag = std::max(st_->lag, value_ - std::min(opened_, value_));
         st_->now = value_;
         [ctx_.queue commit:list count:1 options:opts];
         [ctx_.queue signalEvent:ctx_.done value:value_];

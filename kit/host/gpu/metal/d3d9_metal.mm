@@ -7223,9 +7223,22 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             }
             return d;
         };
+        // The vertex layout by its contents: pd.vertexDescriptor is pd's own copy, freed with pd, so its address came
+        // back for other layouts and a draw got a base reading its vertices wrongly (v4: the "lasers from the sky").
+        uint64_t vkey = 0;
+        if (MTLVertexDescriptor *v = pd.vertexDescriptor) {
+            for (NSUInteger i = 0; i < 16; ++i) {
+                MTLVertexAttributeDescriptor *a = v.attributes[i];
+                vkey = mix(vkey, (uint64_t)a.format << 48 | (uint64_t)a.bufferIndex << 32 | a.offset);
+            }
+            for (NSUInteger i = 0; i < 9; ++i) {
+                MTLVertexBufferLayoutDescriptor *l = v.layouts[i];
+                vkey = mix(vkey, (uint64_t)l.stepFunction << 56 | (uint64_t)l.stepRate << 32 | l.stride);
+            }
+        }
         uint64_t bkey = mix(mix((uint64_t)(uintptr_t)(__bridge const void *)pd.vertexFunction,
                                 (uint64_t)(uintptr_t)(__bridge const void *)pd.fragmentFunction),
-                            (uint64_t)(uintptr_t)(__bridge const void *)pd.vertexDescriptor);
+                            vkey);
         bkey = mix(mix(bkey, pd.rasterSampleCount), cmask);
         NSError *error = nil;
         auto bit = m4_bases_.find(bkey);
