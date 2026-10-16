@@ -58,12 +58,13 @@ struct D9M4State {
             it->second.second = now;
         }
     }
-    // Every 256 command buffers: what was not used for that long and the GPU is past leaves the set (and is released).
+    // Every 8 command buffers: what the GPU is past and was not used in the last 2 leaves the set and is released.
+    // (Held for 256 it kept every buffer the game replaces each frame alive for ~4 s: 3 GB on the owner's phone.)
     void sweep(uint64_t completed) {
-        if (now % 256 != 0)
+        if (now % 8 != 0)
             return;
         for (auto it = held.begin(); it != held.end();) {
-            if (it->second.second + 256 < now && it->second.second <= completed) {
+            if (it->second.second + 2 < now && it->second.second <= completed) {
                 [resident removeAllocation:(id<MTLAllocation>)it->second.first];
                 resident_dirty = true;
                 it = held.erase(it);
