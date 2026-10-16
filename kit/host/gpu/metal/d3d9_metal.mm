@@ -4674,6 +4674,10 @@ class Renderer final : public D9Backend {
             device_->commit(cb);
         }
         ++presents_;
+        if (m4_ && presents_ % 600 == 0 && presents_)   // v4 Metal 4 pipelines: compiled bases vs cheap specializations
+            fprintf(stderr, "[gpu] Metal 4 pipelines: %llu compiled (%.0f ms), %llu specialized (%.0f ms), %llu failed\n",
+                    (unsigned long long)m4_base_n_, m4_base_ns_ / 1e6, (unsigned long long)m4_spec_n_, m4_spec_ns_ / 1e6,
+                    (unsigned long long)m4_fail_n_);
         if (presents_ % 600 == 0)   // v2.4: GPU waits left vs uploads that no longer wait (staged_upload)
             fprintf(stderr, "[gpu] frame %llu: %llu GPU waits, %llu staged texture uploads so far\n",
                     (unsigned long long)presents_, (unsigned long long)settle_waits_,
@@ -6956,6 +6960,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 libs_by_src_.emplace(warm_key, lib);
             if (lib)
                 fn = [lib newFunctionWithName:pixel ? @"ps_main" : @"vs_main"];
+            if (fn)
+                fn_libs_[(__bridge const void *)fn] = lib;   // v4 Metal 4: pipelines name the library and function
             if (fn && !warm_key.empty())
                 fn_warm_keys_[(__bridge const void *)fn] = warm_key;   // Test70: names the pipeline identity
             else if (!fn) // Test73: a compiled shader without a warm-up cache is not a failure
@@ -7119,6 +7125,14 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     return ready;
                 }
         }
+        if (m4_)   // v4 Metal 4: a cheap specialization of the shader pair's one compiled pipeline
+            if (@available(macOS 26.0, iOS 26.0, *))
+                if (id<MTLRenderPipelineState> m4 = m4_pipeline(pd)) {
+                    if (!spec.empty())
+                        warm_->record_pipeline(spec);
+                    pipelines_[key] = m4;
+                    return m4;
+                }
         NSError *error = nil;
         const uint64_t pso_t0 = os_monotonic_ns();
         id<MTLRenderPipelineState> pso = [mtl_ newRenderPipelineStateWithDescriptor:pd
@@ -7133,6 +7147,94 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         return pso;
     }
 
+    // v4 Metal 4 flexible pipelines: the classic descriptor `pd` as an MTL4 one. The shader pair is compiled once with
+    // every colour attachment's format, blend state, factors, operations and write mask left unspecialized; each real
+    // combination is then a specialization of that base (no shader compile). Nil: the caller builds it classically.
+    id<MTLRenderPipelineState> m4_pipeline(MTLRenderPipelineDescriptor *pd) API_AVAILABLE(macos(26.0), ios(26.0)) {
+        D9M4 *m4 = (D9M4 *)m4_;
+        auto fdesc = [&](id<MTLFunction> f) -> MTL4LibraryFunctionDescriptor * {
+            auto it = f ? fn_libs_.find((__bridge const void *)f) : fn_libs_.end();
+            if (it == fn_libs_.end())
+                return nil;
+            MTL4LibraryFunctionDescriptor *d = [MTL4LibraryFunctionDescriptor new];
+            d.library = it->second;
+            d.name = f.name;
+            return d;
+        };
+        MTL4LibraryFunctionDescriptor *vd = fdesc(pd.vertexFunction), *fd = fdesc(pd.fragmentFunction);
+        if (!vd || !fd || !m4.compiler)
+            return nil;
+        uint32_t cmask = 0;
+        for (int i = 0; i < 4; ++i)
+            if (pd.colorAttachments[i].pixelFormat != MTLPixelFormatInvalid)
+                cmask |= 1u << i;
+        auto descriptor = [&](bool specialized) {
+            MTL4RenderPipelineDescriptor *d = [MTL4RenderPipelineDescriptor new];
+            d.vertexFunctionDescriptor = vd;
+            d.fragmentFunctionDescriptor = fd;
+            d.vertexDescriptor = pd.vertexDescriptor;
+            d.rasterSampleCount = pd.rasterSampleCount;
+            for (int i = 0; i < 4; ++i) {
+                if (!(cmask >> i & 1))
+                    continue;
+                MTLRenderPipelineColorAttachmentDescriptor *c = pd.colorAttachments[i];
+                MTL4RenderPipelineColorAttachmentDescriptor *a = d.colorAttachments[i];
+                if (!specialized) {
+                    a.pixelFormat = MTLPixelFormatUnspecialized;
+                    a.writeMask = MTLColorWriteMaskUnspecialized;
+                    a.blendingState = MTL4BlendStateUnspecialized;
+                    a.sourceRGBBlendFactor = a.destinationRGBBlendFactor = MTLBlendFactorUnspecialized;
+                    a.sourceAlphaBlendFactor = a.destinationAlphaBlendFactor = MTLBlendFactorUnspecialized;
+                    a.rgbBlendOperation = a.alphaBlendOperation = MTLBlendOperationUnspecialized;
+                    continue;
+                }
+                a.pixelFormat = c.pixelFormat;
+                a.writeMask = c.writeMask;
+                a.blendingState = c.blendingEnabled ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
+                a.sourceRGBBlendFactor = c.sourceRGBBlendFactor;
+                a.destinationRGBBlendFactor = c.destinationRGBBlendFactor;
+                a.sourceAlphaBlendFactor = c.sourceAlphaBlendFactor;
+                a.destinationAlphaBlendFactor = c.destinationAlphaBlendFactor;
+                a.rgbBlendOperation = c.rgbBlendOperation;
+                a.alphaBlendOperation = c.alphaBlendOperation;
+            }
+            return d;
+        };
+        uint64_t bkey = mix(mix((uint64_t)(uintptr_t)(__bridge const void *)pd.vertexFunction,
+                                (uint64_t)(uintptr_t)(__bridge const void *)pd.fragmentFunction),
+                            (uint64_t)(uintptr_t)(__bridge const void *)pd.vertexDescriptor);
+        bkey = mix(mix(bkey, pd.rasterSampleCount), cmask);
+        NSError *error = nil;
+        auto bit = m4_bases_.find(bkey);
+        if (bit == m4_bases_.end()) {
+            const uint64_t t0 = os_monotonic_ns();
+            id<MTLRenderPipelineState> base = [m4.compiler newRenderPipelineStateWithDescriptor:descriptor(false)
+                                                                            compilerTaskOptions:nil
+                                                                                          error:&error];
+            const uint64_t ns = os_monotonic_ns() - t0;
+            note_shader_work(ns, false);
+            m4_base_ns_ += ns;
+            ++m4_base_n_;
+            if (!base && ++m4_fail_n_ <= 4)
+                fprintf(stderr, "[gpu] Metal 4 pipeline base failed (classic pipeline instead): %s\n",
+                        error.localizedDescription.UTF8String);
+            bit = m4_bases_.emplace(bkey, base).first;
+        }
+        if (!bit->second)
+            return nil;
+        const uint64_t t0 = os_monotonic_ns();
+        id<MTLRenderPipelineState> p = [m4.compiler newRenderPipelineStateBySpecializationWithDescriptor:descriptor(true)
+                                                                                                  pipeline:bit->second
+                                                                                                     error:&error];
+        const uint64_t ns = os_monotonic_ns() - t0;
+        note_shader_work(ns, false);
+        m4_spec_ns_ += ns;
+        ++m4_spec_n_;
+        if (!p && ++m4_fail_n_ <= 4)
+            fprintf(stderr, "[gpu] Metal 4 pipeline specialization failed (classic pipeline instead): %s\n",
+                    error.localizedDescription.UTF8String);
+        return p;
+    }
     id<MTLRenderPipelineState> utility_pipeline(uint64_t key, NSString *fragment,
                                                 const MTLPixelFormat cf[4], MTLPixelFormat df,
                                                 bool write_color) {
@@ -8027,6 +8129,11 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     std::unordered_map<uint32_t, Buf> buffers_;
     std::unordered_map<uint64_t, id<MTLFunction>> functions_;
     std::unordered_map<const void *, std::string> fn_warm_keys_;
+    // v4 Metal 4 pipelines (m4_pipeline): each function's library; the unspecialized pipelines (one per shader pair,
+    // vertex layout, sample count and attachment set); counts and times for the log.
+    std::unordered_map<const void *, id<MTLLibrary>> fn_libs_;
+    std::unordered_map<uint64_t, id<MTLRenderPipelineState>> m4_bases_;
+    uint64_t m4_base_n_ = 0, m4_spec_n_ = 0, m4_base_ns_ = 0, m4_spec_ns_ = 0, m4_fail_n_ = 0;
     // Run 15 (hitch): deferral is allowed only inside the main draw's variant fallback chain.
     bool defer_ok_ = false;
     std::unordered_map<std::string, id<MTLLibrary>> libs_by_src_;   // warm key -> library built this session
