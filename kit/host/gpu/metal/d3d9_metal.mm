@@ -38,6 +38,7 @@
 #include "remaster_cache.h"
 #include "grass.h"
 #include "foundation.h"   // Remaster run 14 foundation F1/F3 (pure C++)
+#include "d3d9_encoders.h"   // v4 Metal 4: the command buffer and encoders the renderer encodes into
 #include "smoke_light.h"  // Remaster run 14 lit smoke (pure C++: kinds, the lighting twin, the parameter block)
 #include "atmosphere.h"   // Remaster run 14 B1 height fog (pure C++ and its Metal source)
 #include <future>
@@ -1595,7 +1596,7 @@ class Renderer final : public D9Backend {
         }
         end_pass();
         begin_frame();
-        id<MTLBlitCommandEncoder> blit = [cmd_ blitCommandEncoder];
+        D9BlitEnc *blit = [cmd_ blitCommandEncoder];
         [blit copyFromTexture:t.texture
                          sourceSlice:face
                          sourceLevel:level
@@ -1607,8 +1608,8 @@ class Renderer final : public D9Backend {
             destinationBytesPerImage:(NSUInteger)pw * ph * (fl ? 8 : 4)];
         [blit endEncoding];
         t.used = serial_;
-        [cmd_ addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-          if (cb.error) {
+        [cmd_ addDone:^(NSError *error, double) {
+          if (error) {
               deliver(ticket, request, nullptr, 0, 0);
               return;
           }
@@ -1763,7 +1764,7 @@ class Renderer final : public D9Backend {
         rp.colorAttachments[0].texture = soft_depth_;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> e = [cmd_ renderCommandEncoderWithDescriptor:rp];
+        D9RenderEnc *e = [cmd_ renderCommandEncoderWithDescriptor:rp];
         const uint32_t saved = pass_samples_;
         pass_samples_ = 1;
         MTLPixelFormat cf[4] = {MTLPixelFormatR32Float, MTLPixelFormatInvalid, MTLPixelFormatInvalid, MTLPixelFormatInvalid};
@@ -4946,7 +4947,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         rp.colorAttachments[0].texture = t.texture;   // the resolved frame (its samples are drawn anew next frame)
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> enc = [cmd_ renderCommandEncoderWithDescriptor:rp];
+        D9RenderEnc *enc = [cmd_ renderCommandEncoderWithDescriptor:rp];
         [enc setRenderPipelineState:pso];
         [enc setFragmentTexture:hdr_excess_ atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -5082,7 +5083,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             note_alloc(AS_KEPT, kept_, w, h, 1, 0);
         }
         begin_frame();
-        id<MTLBlitCommandEncoder> blit = [cmd_ blitCommandEncoder];
+        D9BlitEnc *blit = [cmd_ blitCommandEncoder];
         [blit copyFromTexture:t.texture
                   sourceSlice:0
                   sourceLevel:0
@@ -5145,7 +5146,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
 
     bool read_presented(uint8_t *rgb, uint32_t cap, uint32_t *w, uint32_t *h) override {
         id<MTLTexture> kept;
-        id<MTLCommandBuffer> cmd;
+        D9Cmd *cmd;
         {
             std::lock_guard<std::mutex> lock(kept_mutex_);
             kept = kept_;
@@ -5430,7 +5431,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             sc.outputTexture = up_.out;
             sc.inputContentWidth = iw;
             sc.inputContentHeight = ih;
-            [sc encodeToCommandBuffer:cmd_];
+            [sc encodeToCommandBuffer:cmd_.raw];
             return up_.out;
         }
         return nil;
@@ -5728,7 +5729,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         rp.depthAttachment.texture = tmp_.z32;
         rp.depthAttachment.loadAction = MTLLoadActionDontCare;
         rp.depthAttachment.storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> e = [cmd_ renderCommandEncoderWithDescriptor:rp];
+        D9RenderEnc *e = [cmd_ renderCommandEncoderWithDescriptor:rp];
         if (!e)
             return nil;
         [e setRenderPipelineState:tmp_.zpso];
@@ -5831,7 +5832,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             sc.reset = reset;
             tmp_.resets += reset;
             tmp_.reset_next = false;
-            [sc encodeToCommandBuffer:cmd_];
+            [sc encodeToCommandBuffer:cmd_.raw];
             ++tmp_.scaled;
             return tmp_.out;
         }
@@ -6203,7 +6204,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         const bool count = measure && !sl.pending;   // a slot still in flight: this frame goes uncounted
         end_pass();
         begin_frame();
-        id<MTLComputeCommandEncoder> ce = [cmd_ computeCommandEncoder];
+        D9ComputeEnc *ce = [cmd_ computeCommandEncoder];
         const bool ms = z.textureType == MTLTextureType2DMultisample;
         [ce setComputePipelineState:fnd_.cs[ms ? 1 : 0]];
         [ce setTexture:z atIndex:0];
@@ -6671,7 +6672,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         }
         end_pass();
         begin_frame();
-        id<MTLBlitCommandEncoder> blit = [cmd_ blitCommandEncoder];
+        D9BlitEnc *blit = [cmd_ blitCommandEncoder];
         [blit copyFromBuffer:staging
                    sourceOffset:0
               sourceBytesPerRow:row
@@ -6701,21 +6702,21 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             dispatch_semaphore_wait(frames_, DISPATCH_TIME_FOREVER);
             gpu_wait_s_ += CACurrentMediaTime() - t0;
         }
-        cmd_ = [queue_ commandBuffer];
+        cmd_ = [[D9Cmd alloc] initWithQueue:queue_];
         ++serial_;
         dispatch_semaphore_t sem = frames_;
         uint64_t serial = serial_;
         std::atomic<uint64_t> *done = &completed_;
         std::atomic<uint64_t> *gpu_us = &gpu_us_;
-        [cmd_ addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-          if (cb.GPUEndTime > cb.GPUStartTime) {
-              const uint64_t us = (uint64_t)((cb.GPUEndTime - cb.GPUStartTime) * 1e6);
+        [cmd_ addDone:^(NSError *error, double gpu_s) {
+          if (gpu_s > 0.0) {
+              const uint64_t us = (uint64_t)(gpu_s * 1e6);
               gpu_us->fetch_add(us);
               g_host_game_gpu_us.fetch_add(us, std::memory_order_relaxed); // Test83: the overlay's GPU
           }
-          if (cb.error)
+          if (error)
               fprintf(stderr, "d3d9 metal: command buffer failed: %s\n",
-                      cb.error.localizedDescription.UTF8String);
+                      error.localizedDescription.UTF8String);
           done->store(serial);
           dispatch_semaphore_signal(sem);
         }];
@@ -7467,7 +7468,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     id<MTLLibrary> utility_;
     bool bc_ = false;
     dispatch_semaphore_t frames_;
-    id<MTLCommandBuffer> cmd_ = nil, last_ = nil;
+    D9Cmd *cmd_ = nil, *last_ = nil;
     uint64_t serial_ = 0;
     uint64_t submitted_ = 0, pass_serial_ = 0;
     uint32_t resource_generation_ = 0, trace_flushes_ = 0;
@@ -7487,7 +7488,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     double gpu_wait_s_ = 0;           // time the game thread spent waiting for the GPU
     uint64_t report_cpu_ns_ = 0, report_instructions_ = 0;
     bool in_flight_ = false;
-    id<MTLRenderCommandEncoder> enc_ = nil;
+    D9RenderEnc *enc_ = nil;
     std::unordered_map<uint32_t, Query> queries_;
     uint32_t query_ = 0;
     id<MTLBuffer> vis_ = nil;
@@ -7995,7 +7996,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     uint32_t last_presented_ = 0, last_w_ = 0, last_h_ = 0;
     std::mutex kept_mutex_;
     id<MTLTexture> kept_ = nil;
-    id<MTLCommandBuffer> kept_cmd_ = nil;
+    D9Cmd *kept_cmd_ = nil;
     uint32_t kept_w_ = 0, kept_h_ = 0;
     std::string probe_tag_;
     uint64_t probe_frame_ =
