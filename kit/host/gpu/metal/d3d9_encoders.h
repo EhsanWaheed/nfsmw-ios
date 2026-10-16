@@ -309,14 +309,20 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         m->_compiler = [device newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&error];
         m->_done = [device newSharedEvent];
         m->_presented = [device newSharedEvent];
-        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
-        ad.maxBufferBindCount = 31;
-        ad.maxTextureBindCount = 31;
-        ad.maxSamplerStateBindCount = 16;
-        ad.initializeBindings = YES;
-        m->_vtab = [device newArgumentTableWithDescriptor:ad error:&error];
-        m->_ftab = [device newArgumentTableWithDescriptor:ad error:&error];
-        m->_ctab = [device newArgumentTableWithDescriptor:ad error:&error];
+        // Each table only as big as its stage's slots (a draw snapshots its tables: a smaller table is a cheaper draw):
+        // vertex buffers 0-8 streams, 10 grass, 16-21 constants / params / motion; fragment textures and samplers 0-15
+        // the D3D9 stages, 16-18 ours; fragment buffers 0-5; compute 2 buffers, 6 textures.
+        auto table = [&](NSUInteger buffers, NSUInteger textures, NSUInteger samplers) {
+            MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
+            ad.maxBufferBindCount = buffers;
+            ad.maxTextureBindCount = textures;
+            ad.maxSamplerStateBindCount = samplers;
+            ad.initializeBindings = YES;
+            return [device newArgumentTableWithDescriptor:ad error:&error];
+        };
+        m->_vtab = table(22, 1, 1);
+        m->_ftab = table(6, 19, 16);
+        m->_ctab = table(2, 6, 0);
         m->chunks_ = [NSMutableArray array];
         m->allocators_ = [NSMutableArray array];
         MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
@@ -951,7 +957,11 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
 - (uint64_t)upload:(const void *)bytes length:(NSUInteger)length slot:(int)slot {
     if (!buf_)
         return 0;
-    if (slot >= 0 && slot < 96) {   // the same bytes again (most draws share their camera / parameter blocks)
+    // The same bytes again: only for small blocks (parameter blocks); comparing the 4 KB constant arrays cost more
+    // than copying them (~20 MB compared a frame on the owner's phone).
+    if (length > 256)
+        slot = -1;
+    if (slot >= 0 && slot < 96) {
         const LastUpload &l = last_[slot];
         if (l.at && l.length == length && !memcmp(l.at, bytes, length)) {
             ++st_->reused;
