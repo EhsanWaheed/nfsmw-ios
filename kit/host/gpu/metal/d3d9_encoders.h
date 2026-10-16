@@ -28,49 +28,103 @@ typedef void (^D9CmdDone)(NSError *error, double gpu_s);
 @class D9Cmd;
 
 // The Metal 4 renderer's shared state, render thread only (the pools below lock: feedback handlers return to them).
+// One flat open-addressing table (no allocation per resource, one lookup per bind) does three jobs per resource:
+// residency (the queue's set), lifetime (a strong reference, released once the GPU is past its last use) and the
+// precise-barrier hazards (the barrier generation it was last written / read in: a barrier is ++gen, nothing clears).
 struct D9M4State {
+    struct Slot {
+        const void *key = nullptr;
+        __strong id obj = nil;
+        uint64_t last = 0;
+        uint32_t wgen = 0, rgen = 0;
+    };
     bool precise = true;   // RECOMP_METAL4_BARRIERS=safe: a barrier at the start of every pass
-    // Residency and lifetime: resource -> (strong reference, value of the last command buffer that used it).
     id<MTLResidencySet> resident = nil;
-    std::unordered_map<const void *, std::pair<id, uint64_t>> held;
+    std::vector<Slot> slots;
+    size_t count = 0, mask = 0;
     bool resident_dirty = false;
     uint64_t now = 1;   // the value the open command buffer will signal
+    uint32_t gen = 1;   // the barrier generation
     // Argument-table entries as last set (kind 0 vertex, 1 fragment, 2 compute); ~0 = never.
     uint64_t addr[3][32];
     uint64_t tex[3][32];
     uint64_t smp[3][16];
-    // Since the last barrier: textures some pass wrote / read.
-    std::unordered_set<const void *> written, read;
     uint64_t barriers = 0, uploaded = 0, reused = 0, table_sets = 0, table_skips = 0;
     D9M4State() {
         memset(addr, 0xff, sizeof addr);
         memset(tex, 0xff, sizeof tex);
         memset(smp, 0xff, sizeof smp);
+        slots.resize(1u << 16);
+        mask = slots.size() - 1;
     }
-    void touch(id r) {
-        if (!r)
-            return;
-        auto [it, fresh] = held.try_emplace((__bridge const void *)r, r, now);
-        if (fresh) {
-            [resident addAllocation:(id<MTLAllocation>)r];
-            resident_dirty = true;
-        } else {
-            it->second.second = now;
+    size_t home(const void *k) const { return (size_t)(((uintptr_t)k >> 4) * 0x9E3779B97F4A7C15ull >> 20) & mask; }
+    Slot *find(const void *k) {
+        for (size_t i = home(k);; i = (i + 1) & mask) {
+            Slot &x = slots[i];
+            if (x.key == k)
+                return &x;
+            if (!x.key)
+                return nullptr;
         }
     }
-    // Every 8 command buffers: what the GPU is past and was not used in the last 2 leaves the set and is released.
-    // (Held for 256 it kept every buffer the game replaces each frame alive for ~4 s: 3 GB on the owner's phone.)
+    void put(Slot &&v) {   // v.key not present
+        for (size_t i = home(v.key);; i = (i + 1) & mask)
+            if (!slots[i].key) {
+                slots[i] = std::move(v);
+                ++count;
+                return;
+            }
+    }
+    void rebuild(size_t capacity) {   // the survivors into a fresh table (no tombstones)
+        std::vector<Slot> old;
+        old.swap(slots);
+        slots.resize(capacity);
+        mask = capacity - 1;
+        count = 0;
+        for (Slot &x : old)
+            if (x.key)
+                put(std::move(x));
+    }
+    // This command buffer uses `r`: resident and alive until the GPU is past it. Nil: nullptr.
+    Slot *use(id r) {
+        if (!r)
+            return nullptr;
+        const void *k = (__bridge const void *)r;
+        if (Slot *x = find(k)) {
+            x->last = now;
+            return x;
+        }
+        if ((count + 1) * 10 > slots.size() * 9)   // nearly full (the commit-time growth missed it): grow now
+            rebuild(slots.size() * 2);
+        [resident addAllocation:(id<MTLAllocation>)r];
+        resident_dirty = true;
+        Slot v;
+        v.key = k;
+        v.obj = r;
+        v.last = now;
+        put(std::move(v));
+        return find(k);
+    }
+    // At each commit: every 8 command buffers what the GPU is past and the last 2 did not use leaves (released);
+    // the table grows at half full. (Holding for 256 kept every buffer the game replaces each frame alive for ~4 s:
+    // 3 GB on the owner's phone.)
     void sweep(uint64_t completed) {
+        if (count * 2 > slots.size())
+            rebuild(slots.size() * 2);
         if (now % 8 != 0)
             return;
-        for (auto it = held.begin(); it != held.end();) {
-            if (it->second.second + 2 < now && it->second.second <= completed) {
-                [resident removeAllocation:(id<MTLAllocation>)it->second.first];
-                resident_dirty = true;
-                it = held.erase(it);
-            } else {
-                ++it;
+        bool removed = false;
+        for (Slot &x : slots)
+            if (x.key && x.last + 2 < now && x.last <= completed) {
+                [resident removeAllocation:(id<MTLAllocation>)x.obj];
+                x.key = nullptr;
+                x.obj = nil;
+                --count;
+                removed = true;
             }
+        if (removed) {
+            resident_dirty = true;
+            rebuild(slots.size());
         }
     }
     void commit_residency() {
@@ -79,16 +133,22 @@ struct D9M4State {
             resident_dirty = false;
         }
     }
-    bool read_conflict(id r) const { return r && written.count((__bridge const void *)r); }
-    bool write_conflict(id r) const {
-        const void *p = (__bridge const void *)r;
-        return r && (written.count(p) || read.count(p));
+    bool read_conflict(const Slot *x) const { return x && x->wgen == gen; }
+    bool write_conflict(const Slot *x) const { return x && (x->wgen == gen || x->rgen == gen); }
+    void mark_written(Slot *x) {
+        if (x)
+            x->wgen = gen;
     }
+    void mark_read(Slot *x) {
+        if (x)
+            x->rgen = gen;
+    }
+    void mark_written_key(const void *k) { mark_written(find(k)); }
     void barrier_done() {
-        written.clear();
-        read.clear();
+        ++gen;
         ++barriers;
     }
+    size_t held() const { return count; }
 };
 
 // ---- the Metal 4 context: one per renderer --------------------------------------------------------------------------
@@ -430,7 +490,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         id<MTL4RenderCommandEncoder> e = enc;
         bool need = !st->precise;
         for (id<MTLTexture> t : att)
-            need = need || st->write_conflict(t);
+            need = need || st->write_conflict(st->use(t));
         if (need) {
             [e barrierAfterQueueStages:kD9AllStages
                           beforeStages:MTLStageVertex | MTLStageFragment
@@ -439,7 +499,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         }
         for (id<MTLTexture> t : att) {
             writes_.push_back((__bridge const void *)t);
-            st->written.insert((__bridge const void *)t);
+            st->mark_written(st->use(t));
         }
         [e setArgumentTable:vt atStages:MTLRenderStageVertex];
         [e setArgumentTable:ft atStages:MTLRenderStageFragment];
@@ -451,19 +511,19 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
 }
 // A resource this pass reads that an earlier pass wrote since the last barrier: a barrier before the next draw.
 - (void)m4Read:(id)r texture:(bool)texture API_AVAILABLE(macos(26.0), ios(26.0)) {
-    if (!r)
+    D9M4State::Slot *x = st_->use(r);
+    if (!x)
         return;
-    [cmd_ touch:r];
-    if (st_->precise && st_->read_conflict(r)) {
+    if (st_->precise && st_->read_conflict(x)) {
         [(id<MTL4RenderCommandEncoder>)m_ barrierAfterQueueStages:kD9AllStages
                                                       beforeStages:MTLStageVertex | MTLStageFragment
                                                  visibilityOptions:MTL4VisibilityOptionDevice];
         st_->barrier_done();
-        for (const void *w : writes_)
-            st_->written.insert(w);
+        for (const void *w : writes_)   // this pass still writes its attachments
+            st_->mark_written_key(w);
     }
     if (texture)
-        st_->read.insert((__bridge const void *)r);
+        st_->mark_read(x);
 }
 #define D9_M4(stmt)                                                                                                    \
     if (m_) {                                                                                                          \
@@ -636,18 +696,18 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
 }
 // A copy reads `src` and writes `dst`: a barrier first if an earlier pass wrote src, or read or wrote dst.
 - (void)m4Copy:(id)src to:(id)dst API_AVAILABLE(macos(26.0), ios(26.0)) {
-    [cmd_ touch:src];
-    [cmd_ touch:dst];
-    if (st_->precise && (st_->read_conflict(src) || st_->write_conflict(dst))) {
+    st_->use(src);
+    st_->use(dst);
+    D9M4State::Slot *s = src ? st_->find((__bridge const void *)src) : nullptr;   // after both uses (growth)
+    D9M4State::Slot *d = dst ? st_->find((__bridge const void *)dst) : nullptr;
+    if (st_->precise && (st_->read_conflict(s) || st_->write_conflict(d))) {
         [(id<MTL4ComputeCommandEncoder>)m_ barrierAfterQueueStages:kD9AllStages
                                                        beforeStages:MTLStageBlit
                                                   visibilityOptions:MTL4VisibilityOptionDevice];
         st_->barrier_done();
     }
-    if (src)
-        st_->read.insert((__bridge const void *)src);
-    if (dst)
-        st_->written.insert((__bridge const void *)dst);
+    st_->mark_read(s);
+    st_->mark_written(d);
 }
 #define D9_M4(stmt)                                                                                                    \
     if (m_) {                                                                                                          \
@@ -783,19 +843,20 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
 }
 // A kernel's resource: read and maybe written (a kernel says neither), so both conflicts count.
 - (void)m4Bind:(id)r API_AVAILABLE(macos(26.0), ios(26.0)) {
-    if (!r)
+    D9M4State::Slot *x = st_->use(r);
+    if (!x)
         return;
-    [cmd_ touch:r];
-    if (st_->precise && st_->write_conflict(r)) {
+    if (st_->precise && st_->write_conflict(x)) {
         [(id<MTL4ComputeCommandEncoder>)m_ barrierAfterQueueStages:kD9AllStages
                                                        beforeStages:MTLStageDispatch
                                                   visibilityOptions:MTL4VisibilityOptionDevice];
         st_->barrier_done();
         for (const void *w : writes_)
-            st_->written.insert(w);
+            st_->mark_written_key(w);
+        x = st_->find((__bridge const void *)r);
     }
     writes_.push_back((__bridge const void *)r);
-    st_->written.insert((__bridge const void *)r);
+    st_->mark_written(x);
 }
 #define D9_M4(stmt)                                                                                                    \
     if (m_) {                                                                                                          \
@@ -885,7 +946,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
 }
 - (void)touch:(id<MTLResource>)r {
     if (buf_)
-        st_->touch(r);
+        st_->use(r);
 }
 - (uint64_t)upload:(const void *)bytes length:(NSUInteger)length slot:(int)slot {
     if (!buf_)
@@ -902,7 +963,7 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         chunk_ = [ctx_ takeChunk:n];
         used_ = 0;
         [chunks_ addObject:chunk_];
-        st_->touch(chunk_);
+        st_->use(chunk_);
     }
     uint8_t *at = (uint8_t *)chunk_.contents + used_;
     memcpy(at, bytes, length);
@@ -924,25 +985,25 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
             if (!a.texture)
                 continue;
             d.colorAttachments[i] = [a copy];
-            st_->touch(a.texture);
+            st_->use(a.texture);
             att.push_back(a.texture);
             if (a.resolveTexture) {
-                st_->touch(a.resolveTexture);
+                st_->use(a.resolveTexture);
                 att.push_back(a.resolveTexture);
             }
         }
         if (rp.depthAttachment.texture) {
             d.depthAttachment = [rp.depthAttachment copy];
-            st_->touch(rp.depthAttachment.texture);
+            st_->use(rp.depthAttachment.texture);
             att.push_back(rp.depthAttachment.texture);
         }
         if (rp.stencilAttachment.texture) {
             d.stencilAttachment = [rp.stencilAttachment copy];
-            st_->touch(rp.stencilAttachment.texture);
+            st_->use(rp.stencilAttachment.texture);
         }
         if (rp.visibilityResultBuffer) {
             d.visibilityResultBuffer = rp.visibilityResultBuffer;
-            st_->touch(rp.visibilityResultBuffer);
+            st_->use(rp.visibilityResultBuffer);
         }
         if (rp.renderTargetWidth)
             d.renderTargetWidth = rp.renderTargetWidth;
@@ -978,11 +1039,8 @@ static inline void d9_set_smp(D9M4State *st, int kind, id<MTL4ArgumentTable> t, 
         [e barrierAfterQueueStages:kD9AllStages beforeStages:kD9AllStages visibilityOptions:MTL4VisibilityOptionDevice];
         [e endEncoding];
         st_->barrier_done();
-        for (id<MTLTexture> t : written) {   // MetalFX reads and writes these: the next pass that uses one waits
-            st_->touch(t);
-            if (t)
-                st_->written.insert((__bridge const void *)t);
-        }
+        for (id<MTLTexture> t : written)   // MetalFX reads and writes these: the next pass that uses one waits
+            st_->mark_written(st_->use(t));
     }
 }
 - (void)addDone:(D9CmdDone)done {

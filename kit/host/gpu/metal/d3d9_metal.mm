@@ -7653,7 +7653,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 up = [m takeUploadedBytes];
                 bars = [m takeBarriers];
                 D9M4State *st = m.st;
-                reused = st->reused, sets = st->table_sets, skips = st->table_skips, held = st->held.size();
+                reused = st->reused, sets = st->table_sets, skips = st->table_skips, held = st->held();
                 st->reused = st->table_sets = st->table_skips = 0;
             }
         fprintf(stderr, "[gpu] perf (%s, per frame, last 600): encode CPU %.2f ms, GPU %.2f ms, frame %.2f ms | draws %.0f, "
