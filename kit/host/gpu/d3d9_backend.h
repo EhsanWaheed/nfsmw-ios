@@ -42,6 +42,12 @@ class D9Backend {
 
     virtual void buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
                                uint32_t size) = 0;
+    // v4: with HOST_D9_UPLOAD_NOOVERWRITE flags (no queued draw reads these bytes) a backend may write in place.
+    virtual void buffer_upload_flags(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
+                                     uint32_t size, uint32_t flags) {
+        (void)flags;
+        buffer_upload(id, total, offset, bytes, size);
+    }
     virtual void buffer_drop(uint32_t id) = 0;
 
     virtual void draw(const HostD9Draw &d) = 0;

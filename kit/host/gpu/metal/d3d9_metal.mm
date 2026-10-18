@@ -1653,6 +1653,26 @@ class Renderer final : public D9Backend {
     }
 
     // ---- buffers --------------------------------------------------------
+    // v4: NOOVERWRITE (D3D9: no queued draw reads the bytes written) writes the live buffer: no replacement, no spare.
+    uint64_t in_place_uploads_ = 0;
+    void buffer_upload_flags(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes, uint32_t size,
+                             uint32_t flags) override {
+        if (flags & HOST_D9_UPLOAD_NOOVERWRITE) {
+            Buf &b = buffers_[id];
+            if (b.buffer && b.buffer.length >= total && b.shadow.size() >= total && bytes && offset + size <= total &&
+                !trace_) {
+                memcpy(b.shadow.data() + offset, bytes, size);
+                for (SpareBuf &s : b.spares) {   // the spares are behind by these bytes too
+                    s.lo = s.hi > s.lo ? std::min(s.lo, offset) : offset;
+                    s.hi = std::max(s.hi, offset + size);
+                }
+                memcpy((uint8_t *)b.buffer.contents + offset, bytes, size);
+                ++in_place_uploads_;
+                return;
+            }
+        }
+        buffer_upload(id, total, offset, bytes, size);
+    }
     void buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
                        uint32_t size) override {
         Buf &b = buffers_[id];
@@ -7736,9 +7756,10 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                 perf_alloc_prev_[i] = alloc_[i].count;
             }
             fprintf(stderr, "[gpu] perf new resources per frame: buffers %.2f, spares %.2f, transient %.2f, textures %.2f, "
-                            "other %.2f\n",
+                            "other %.2f | buffer writes in place (NOOVERWRITE) %.1f\n",
                     n[AS_BUFFER], n[AS_BUFFER_SPARE], n[AS_TRANSIENT], n[AS_TEXTURE],
-                    n[AS_MSAA] + n[AS_READBACK] + n[AS_KEPT] + n[AS_FITTED_DEPTH]);
+                    n[AS_MSAA] + n[AS_READBACK] + n[AS_KEPT] + n[AS_FITTED_DEPTH], in_place_uploads_ / frames);
+            in_place_uploads_ = 0;
         }
         perf_last_cpu_ns_ = perf_enc_cpu_ns_;
         perf_last_draws_ = draws_;

@@ -276,6 +276,13 @@ struct ComObj {
     uint32_t ckey_dst_lo = 0, ckey_dst_hi = 0;
     bool has_ckey_src = false, has_ckey_dst = false;
     int32_t lock_count = 0;
+    // v4 vertex / index buffers: the open Locks (guest copy at `ptr` from `lo`; [lo, hi) the bytes locked), written
+    // back at the last Unlock; `noov`: every Lock since the last upload was D3DLOCK_NOOVERWRITE.
+    struct BufLock {
+        uint32_t ptr = 0, lo = 0, hi = 0;
+    };
+    std::vector<BufLock> buf_locks;
+    bool buf_noov = true, buf_written = false;
     // Once handed a writable Lock pointer, the guest may keep using it forever.
     bool retained_pointer = false;
     bool is_primary = false;

@@ -467,7 +467,7 @@ class RenderThread {
                 r_->tag(cmd.a, (uint64_t)cmd.c << 32 | cmd.b);
                 break;
             case Op::BufferUpload:
-                r_->buffer_upload(cmd.a, cmd.b, cmd.c, base + cmd.at, cmd.d);
+                r_->buffer_upload_flags(cmd.a, cmd.b, cmd.c, base + cmd.at, cmd.d, (uint32_t)cmd.r0[0]);
                 break;
             case Op::BufferDrop:
                 r_->buffer_drop(cmd.a);
@@ -687,8 +687,8 @@ void host_d9_texture_read_forget(uint32_t ticket) {
     std::lock_guard<std::mutex> lock(readback_mutex());
     readbacks().erase(ticket);
 }
-void host_d9_buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
-                           uint32_t size) {
+void host_d9_buffer_upload_flags(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
+                                 uint32_t size, uint32_t flags) {
     RenderThread *t = render_thread();
     if (!t || !bytes)
         return;
@@ -698,9 +698,14 @@ void host_d9_buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const u
     c.b = total;
     c.c = offset;
     c.d = size;
+    c.r0[0] = (int32_t)flags;
     c.at = b.put(bytes, size);
     b.commands.push_back(c);
     t->submitted();
+}
+void host_d9_buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
+                           uint32_t size) {
+    host_d9_buffer_upload_flags(id, total, offset, bytes, size, 0);
 }
 void host_d9_buffer_drop(uint32_t id) {
     push(Op::BufferDrop, id);

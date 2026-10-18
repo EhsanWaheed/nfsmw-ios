@@ -29,6 +29,8 @@ HOST_D9_DEFAULT int host_d9_texture_read_poll(uint32_t, uint8_t *, uint32_t, uin
 HOST_D9_DEFAULT void host_d9_texture_read_forget(uint32_t) {}
 HOST_D9_DEFAULT void host_d9_buffer_upload(uint32_t, uint32_t, uint32_t, const uint8_t *,
                                            uint32_t) {}
+HOST_D9_DEFAULT void host_d9_buffer_upload_flags(uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t,
+                                                 uint32_t) {}
 HOST_D9_DEFAULT void host_d9_buffer_drop(uint32_t) {}
 HOST_D9_DEFAULT void host_d9_draw(const HostD9Draw *) {}
 HOST_D9_DEFAULT int host_d9_admission_enabled(void) {

@@ -66,6 +66,11 @@ void host_d9_texture_read_forget(uint32_t ticket);
 // changed.
 void host_d9_buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
                            uint32_t size);
+// v4: the same with flags. HOST_D9_UPLOAD_NOOVERWRITE: every write was D3DLOCK_NOOVERWRITE (no queued draw reads
+// the bytes written), so the backend may write the live buffer instead of replacing it.
+enum : uint32_t { HOST_D9_UPLOAD_NOOVERWRITE = 1 };
+void host_d9_buffer_upload_flags(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
+                                 uint32_t size, uint32_t flags);
 void host_d9_buffer_drop(uint32_t id);
 
 typedef struct HostD9Surface {

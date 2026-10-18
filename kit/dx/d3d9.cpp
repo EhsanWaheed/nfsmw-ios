@@ -787,6 +787,9 @@ static void d3d9_resource_destroy(ComObj *o) {
     if (o->pixels)
         heap_free(o->pixels);
     o->pixels = 0;
+    for (const ComObj::BufLock &l : o->buf_locks)   // v4: a buffer released while locked
+        heap_free(l.ptr);
+    o->buf_locks.clear();
     o->lock_count = 0;
     o->pixels_bytes = 0;
     std::vector<uint8_t>().swap(o->blob);
@@ -1204,10 +1207,13 @@ static void gpu_sync_buffer(ComObj *b) {
     }
     if (m.dirty_hi > m.dirty_lo && !b->blob.empty()) {
         uint32_t hi = std::min<uint32_t>(m.dirty_hi, (uint32_t)b->blob.size());
-        host_d9_buffer_upload(b->id, (uint32_t)b->blob.size(), m.dirty_lo,
-                              b->blob.data() + m.dirty_lo, hi - m.dirty_lo);
+        // v4: every write since the last upload was NOOVERWRITE: the renderer may write in place (D3D9's promise
+        // that no queued draw reads those bytes), no replacement buffer
+        host_d9_buffer_upload_flags(b->id, (uint32_t)b->blob.size(), m.dirty_lo, b->blob.data() + m.dirty_lo,
+                                    hi - m.dirty_lo, b->buf_noov ? HOST_D9_UPLOAD_NOOVERWRITE : 0u);
     }
     m.dirty_lo = m.dirty_hi = 0;
+    b->buf_noov = true;
 }
 static void gpu_forget(ComObj *o) {
     o->gpu_mirror = nullptr;
@@ -2647,18 +2653,41 @@ void Res_GetDevice(X86 *c) {
     com_ret(c, D3D_OK9);
 }
 
-// Lock hands the guest the storage this resource was created with. Unlock is
-// a no-op: there is nothing to upload to yet.
+// (this, OffsetToLock, SizeToLock, ppbData, Flags). v4: a guest copy of the locked range only (from the offset to
+// the end, so a write a little past SizeToLock still lands in guest memory), filled with just the locked bytes
+// (none for DISCARD: the contents are undefined), written back and uploaded as only that range at the last Unlock.
+// It was the whole buffer both ways and a whole-buffer upload for every Lock: a game appending to a big dynamic
+// buffer copied it all on the game thread and made the renderer replace it while the GPU still read it.
 static void buffer_lock(X86 *c) {
     ComObj *o = com_this_arg(c);
-    uint32_t offset = arg(c, 1), out = arg(c, 3);
+    const uint32_t offset = arg(c, 1), want = arg(c, 2), out = arg(c, 3), flags = arg(c, 4);
+    const uint32_t total = (uint32_t)(o ? o->blob.size() : 0);
     if (!o || !out) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
-    uint32_t staged = offset < o->blob.size() ? stage_lock(o) : 0;
-    com_out_ptr(out, staged ? staged + offset : 0);
-    com_ret(c, staged ? D3D_OK9 : E_OUTOFMEMORY);
+    if (offset >= total) {
+        com_out_ptr(out, 0);
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    const uint32_t size = want && want < total - offset ? want : total - offset;
+    const uint32_t ptr = heap_alloc(total - offset, false, 16);
+    if (!ptr) {
+        com_out_ptr(out, 0);
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    if (!(flags & 0x2000u))   // D3DLOCK_DISCARD
+        memcpy(gm_ptr(ptr), o->blob.data() + offset, size);
+    o->buf_locks.push_back({ptr, offset, offset + size});
+    ++o->lock_count;
+    if (!(flags & 0x10u))   // D3DLOCK_READONLY: nothing to upload
+        o->buf_written = true;
+    if (!(flags & 0x1000u) && !(flags & 0x10u))   // D3DLOCK_NOOVERWRITE: the GPU reads none of these bytes
+        o->buf_noov = false;
+    com_out_ptr(out, ptr);
+    com_ret(c, D3D_OK9);
 }
 void VB_Lock(X86 *c) {
     buffer_lock(c);
@@ -2667,7 +2696,20 @@ void IB_Lock(X86 *c) {
     buffer_lock(c);
 }
 void Buf_Unlock(X86 *c) {
-    stage_unlock(com_this_arg(c));
+    ComObj *o = com_this_arg(c);
+    if (o && o->lock_count > 0 && --o->lock_count == 0) {
+        for (const ComObj::BufLock &l : o->buf_locks) {   // in Lock order: a later overlapping Lock wins
+            memcpy(o->blob.data() + l.lo, gm_ptr(l.ptr), l.hi - l.lo);
+            heap_free(l.ptr);
+        }
+        if (o->buf_written) {
+            d9_raster_invalidate(o->id);
+            for (const ComObj::BufLock &l : o->buf_locks)
+                gpu_after_unlock(o, l.lo, l.hi);
+        }
+        o->buf_locks.clear();
+        o->buf_written = false;
+    }
     com_ret(c, D3D_OK9);
 }
 // D3DVERTEXBUFFER_DESC / D3DINDEXBUFFER_DESC: Format, Type, Usage, Pool, Size.
