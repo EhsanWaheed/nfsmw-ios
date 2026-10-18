@@ -675,6 +675,70 @@ void Launcher::layout(int w, int h, int s, int top) {
                                     y0 + (i / columns) * (bh + gap), bw, bh};
 }
 
+// The status headline and detail, and its tone (0 bad, 1 ready, 2 warning): drawn here and shown by a native view.
+void Launcher::status_text(int *tone, std::string *headline, std::string *detail) const {
+    *tone = 0;
+    switch (status_.state) {
+    case State::Ready:
+        *tone = 1;
+        *headline = "Ready to play";
+        *detail = display(status_.root);
+        if (countdown_ > 0) {
+            *headline = "Starting in " + std::to_string(int(countdown_ + 0.999)) + "...";
+            *detail = (info_.touch ? "Touch the screen" : "Press any key") +
+                     std::string(" to open the launcher instead.");
+        }
+        break;
+    case State::WrongVersion:
+        *tone = 2;
+        *headline = "Wrong version of " + spec_.executable;
+        *detail =
+            display(status_.exe) + "\nFound SHA-256 " + status_.digest + "\nNeeded " + spec_.sha256;
+        break;
+    case State::Incomplete: {
+        *tone = 2;
+        *headline = "Game folder is incomplete";
+        std::string missing;
+        for (const std::string &m : status_.missing)
+            missing += (missing.empty() ? "" : ", ") + m;
+        *detail = display(status_.root) + "\nMissing: " + missing;
+        break;
+    }
+    case State::NotFound:
+        *headline = "Game not found";
+        *detail = info_.plays_in_place ? "Locate the folder " + spec_.title +
+                                            " is installed in (it holds " + spec_.executable + ")."
+                                      : "Import your copy of " + spec_.title +
+                                            ": the installed game folder, or a ZIP of it.";
+        if (!info_.drop_hint.empty())
+            *detail += "\n" + info_.drop_hint;
+        if (!spec_.store_url.empty())
+            *detail += "\nGet the game: " + spec_.store_url;
+        break;
+    }
+}
+
+View Launcher::view() {
+    View v;
+    v.title = spec_.title;
+    status_text(&v.tone, &v.headline, &v.detail);
+    v.screen = screen_;
+    v.message = message_;
+    v.countdown = countdown_;
+    v.touch = info_.touch;
+    if (screen_ == Screen::Manage)
+        v.detail2 = "Saves and settings: " + display(info_.profile_dir) +
+                    "\nThey are kept when the game data is deleted or imported again.";
+    {
+        std::lock_guard<std::mutex> lock(shared_->m);
+        v.progress = shared_->progress;
+    }
+    v.buttons = buttons_;
+    v.focus = focus_;
+    dirty_ = false;
+    return v;
+}
+
 void Launcher::draw(Canvas &c, int s) {
     s = std::max(1, s);
     dirty_ = false;
@@ -696,46 +760,10 @@ void Launcher::draw(Canvas &c, int s) {
     int py = y + 10 * s;
     const int px = margin + 10 * s, pw = w - 2 * margin - 20 * s;
     // Status
-    Color accent = kBad;
+    int tone = 0;
     std::string headline, detail;
-    switch (status_.state) {
-    case State::Ready:
-        accent = kReady;
-        headline = "Ready to play";
-        detail = display(status_.root);
-        if (countdown_ > 0) {
-            headline = "Starting in " + std::to_string(int(countdown_ + 0.999)) + "...";
-            detail = (info_.touch ? "Touch the screen" : "Press any key") +
-                     std::string(" to open the launcher instead.");
-        }
-        break;
-    case State::WrongVersion:
-        accent = kWarn;
-        headline = "Wrong version of " + spec_.executable;
-        detail =
-            display(status_.exe) + "\nFound SHA-256 " + status_.digest + "\nNeeded " + spec_.sha256;
-        break;
-    case State::Incomplete: {
-        accent = kWarn;
-        headline = "Game folder is incomplete";
-        std::string missing;
-        for (const std::string &m : status_.missing)
-            missing += (missing.empty() ? "" : ", ") + m;
-        detail = display(status_.root) + "\nMissing: " + missing;
-        break;
-    }
-    case State::NotFound:
-        headline = "Game not found";
-        detail = info_.plays_in_place ? "Locate the folder " + spec_.title +
-                                            " is installed in (it holds " + spec_.executable + ")."
-                                      : "Import your copy of " + spec_.title +
-                                            ": the installed game folder, or a ZIP of it.";
-        if (!info_.drop_hint.empty())
-            detail += "\n" + info_.drop_hint;
-        if (!spec_.store_url.empty())
-            detail += "\nGet the game: " + spec_.store_url;
-        break;
-    }
+    status_text(&tone, &headline, &detail);
+    const Color accent = tone == 1 ? kReady : tone == 2 ? kWarn : kBad;
     std::vector<std::pair<std::string, Color>> lines;
     if (screen_ == Screen::Importing) {
         Progress p;

@@ -107,6 +107,18 @@ struct Button {
     Rect rect;
 };
 
+// What the screen shows, for a native view (iOS) that draws it itself: the same text and buttons draw() uses.
+struct View {
+    std::string title, headline, detail, detail2, message;
+    int tone = 0; // 0 bad, 1 ready, 2 warning
+    Screen screen = Screen::Main;
+    Progress progress;
+    double countdown = 0;
+    bool touch = false;
+    std::vector<Button> buttons;
+    int focus = 0;
+};
+
 class Launcher {
   public:
     Launcher(const Spec &spec, Platform &platform);
@@ -132,6 +144,8 @@ class Launcher {
     void activate(int id);
     void tick(); // picker results and import progress, on the host's thread
     void draw(Canvas &canvas, int scale);
+    // The screen's content for a native view; clears dirty() as draw() does.
+    View view();
 
     bool finished() const {
         return finished_;
@@ -163,6 +177,7 @@ class Launcher {
     }
 
   private:
+    void status_text(int *tone, std::string *headline, std::string *detail) const;
     void rebuild();
     void evaluate(const std::string &root);
     void pick_then(bool folder, bool play_in_place);

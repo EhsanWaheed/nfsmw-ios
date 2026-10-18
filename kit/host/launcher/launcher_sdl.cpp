@@ -1,6 +1,8 @@
 // launcher_sdl.cpp - see launcher_sdl.h.
 #include "launcher_sdl.h"
 
+#include <cstdlib>
+
 #include "../../platform/os.h"
 #include "../gpu/gpu.h"
 
@@ -129,6 +131,11 @@ void write_ppm(const std::string &path, const Canvas &c, bool bgra) {
 
 } // namespace
 
+static NativeViewFactory g_native_view = nullptr;
+void set_native_view(NativeViewFactory factory) {
+    g_native_view = factory;
+}
+
 std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, Platform &platform,
                 const RunOptions &options) {
     const Spec &spec = spec_from_config();
@@ -150,13 +157,19 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
     int dw = 0, dh = 0, bw = 0, bh = 0;
     SDL_GetWindowSizeInPixels(window, &dw, &dh);
     SDL_GetWindowSize(window, &bw, &bh);
+    // v4.1: a native view (iOS) draws the screen itself; the canvas and its swapchain are not used then
+    std::unique_ptr<NativeView> native(g_native_view ? g_native_view(window) : nullptr);
     Presenter presenter;
     presenter.device = device;
     presenter.window = window;
-    if (!presenter.open(native_surface, std::max(1, dw), std::max(1, dh))) {
+    if (!native && !presenter.open(native_surface, std::max(1, dw), std::max(1, dh))) {
         fprintf(stderr, "[launcher] no swapchain for the window: %s\n", SDL_GetError());
         return "";
     }
+    if (native)
+        fprintf(stderr, "[launcher] native view\n");
+    // v4.1: the left stick moves the focus too (one step per push past half way, again after it returns)
+    int stick_dir = 0;
     Canvas canvas;
     std::vector<SDL_Gamepad *> pads;
     uint64_t last = SDL_GetTicksNS();
@@ -208,7 +221,10 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
                 case SDL_EVENT_QUIT:
                     for (SDL_Gamepad *g : pads)
                         SDL_CloseGamepad(g);
-                    presenter.close();
+                    if (native)
+                        native->finish(true);
+                    else
+                        presenter.close();
                     return "";
                 case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                 case SDL_EVENT_WINDOW_RESIZED:
@@ -291,6 +307,18 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
                         break;
                     }
                     break;
+                case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+                    if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX || e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+                        const bool vert = e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY;
+                        const int v = e.gaxis.value;
+                        const int dir = v > 16000 ? (vert ? 2 : 4) : v < -16000 ? (vert ? 1 : 3) : 0;
+                        if (dir && dir != stick_dir)
+                            launcher.key(dir == 1 ? Key::Up : dir == 2 ? Key::Down : dir == 3 ? Key::Left : Key::Right);
+                        if (dir || (std::abs(v) < 8000 && (vert ? (stick_dir == 1 || stick_dir == 2)
+                                                                : (stick_dir == 3 || stick_dir == 4))))
+                            stick_dir = dir;
+                    }
+                    break;
                 case SDL_EVENT_DROP_FILE:
                     if (e.drop.data)
                         launcher.drop(e.drop.data);
@@ -303,7 +331,7 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
         // The countdown runs only while it can be seen, in small steps, so a
         // slow first frame (an app still launching) does not eat it.
         const uint64_t now = SDL_GetTicksNS();
-        if (canvas.width() > 0)
+        if (canvas.width() > 0 || native)
             launcher.advance(std::min(0.1, double(now - last) / 1e9));
         last = now;
         launcher.tick();
@@ -321,6 +349,12 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
         }
         if (launcher.finished() || launcher.quit())
             break; // the last frame shown stays what the player saw
+        if (native) {   // the view refreshes on a change, and while an import or countdown moves
+            if (redraw || launcher.dirty() || launcher.screen() == Screen::Importing || launcher.counting_down())
+                native->update(launcher);
+            redraw = false;
+            continue;
+        }
         SDL_GetWindowSizeInPixels(window, &dw, &dh);
         SDL_GetWindowSize(window, &bw, &bh);
         if (dw <= 0 || dh <= 0)
@@ -339,7 +373,10 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
     }
     for (SDL_Gamepad *g : pads)
         SDL_CloseGamepad(g);
-    presenter.close();
+    if (native)
+        native->finish(launcher.quit());
+    else
+        presenter.close();
     if (launcher.quit())
         return "";
     return launcher.exe();

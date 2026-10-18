@@ -40,6 +40,18 @@ std::string run(SDL_Window *window, gpu::Device *device, void *native_surface, P
 // This target's platform.
 std::unique_ptr<Platform> make_platform(SDL_Window *window);
 
+// A native view of the launcher (iOS: UIKit, Liquid Glass) instead of the canvas: run() updates it with the screen's
+// content, and the player's touches on it call Launcher::activate. Input from keys and controllers still arrives
+// through SDL and moves the launcher's focus, which the view shows. finish() is called once as run() returns.
+class NativeView {
+  public:
+    virtual ~NativeView() = default;
+    virtual void update(Launcher &launcher) = 0;
+    virtual void finish(bool quit) = 0;
+};
+using NativeViewFactory = NativeView *(*)(SDL_Window *window);
+void set_native_view(NativeViewFactory factory);
+
 // Whether the player asked for the launcher at start: --launcher, the
 // RECOMP_LAUNCHER switch, or Shift or Alt held.
 bool requested(int argc, char **argv);

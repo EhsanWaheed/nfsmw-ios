@@ -67,6 +67,13 @@ function(pop_ios_bundle target)
       WORKING_DIRECTORY ${POP_ROOT}
       COMMENT "Making the app icon (build/ios-icon.png when there is one, else the executable's icon)"
       VERBATIM)
+    # v4.1: the launcher's cover art (launcher_ios.mm), the same image as the icon at full size
+    if(EXISTS ${POP_BUILD_ROOT}/ios-icon.png)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${POP_BUILD_ROOT}/ios-icon.png
+                $<TARGET_BUNDLE_CONTENT_DIR:${target}>/LauncherArt.png
+        VERBATIM)
+    endif()
   endif()
   # classic-modes.json is one resource the host reads at startup; the
   # translation's symbol table is the other (the mod foundation's settings

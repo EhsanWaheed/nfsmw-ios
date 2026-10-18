@@ -207,10 +207,10 @@ endif()
 set(POP_LAUNCHER_SOURCES $<TARGET_OBJECTS:launcher_core> $<TARGET_OBJECTS:recomp_miniz>
                          ${HOST}/launcher/launcher_config.cpp ${HOST}/launcher/launcher_sdl.cpp)
 if(IOS)
-  set(POP_PLATFORM_UI ${HOST}/sdl/platform_ui_ios.mm ${HOST}/sdl/ios_overlay.mm)
+  set(POP_PLATFORM_UI ${HOST}/sdl/platform_ui_ios.mm ${HOST}/sdl/ios_overlay.mm ${HOST}/sdl/launcher_ios.mm)
   list(APPEND FW_METAL "-framework UIKit" "-framework UniformTypeIdentifiers" "-framework CoreHaptics"
                        "-framework GameController")
-  set_source_files_properties(${HOST}/sdl/ios_overlay.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  set_source_files_properties(${HOST}/sdl/ios_overlay.mm ${HOST}/sdl/launcher_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 elseif(ANDROID)
   set(POP_PLATFORM_UI ${HOST}/sdl/platform_ui_desktop.cpp ${HOST}/launcher/launcher_platform_android.cpp)
 else()

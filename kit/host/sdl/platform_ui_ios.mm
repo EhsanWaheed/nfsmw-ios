@@ -326,8 +326,11 @@ class IosPlatform final : public launcher::Platform {
 
 } // namespace
 
+launcher::NativeView *ios_launcher_view_make(SDL_Window *window);   // launcher_ios.mm (v4.1)
+
 namespace launcher {
 std::unique_ptr<Platform> make_platform(SDL_Window *window) {
+    set_native_view(ios_launcher_view_make);   // v4.1: the Liquid Glass launcher instead of the canvas
     return std::make_unique<IosPlatform>(window);
 }
 } // namespace launcher
