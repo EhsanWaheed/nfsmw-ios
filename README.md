@@ -65,6 +65,13 @@ new: the game pauses when the settings open in a race, locking the phone no long
 too), an **80 fps** cap that holds (ProMotion's 120/80/60/40/30 steps), 40 fps in menus and 30 while paused to keep
 the phone cool, and the Stuff Pack smoke crash at the race countdown is fixed.
 
+**v4:** the game now draws through **Metal 4** with **MetalFX 4** (Diagnostics → Renderer keeps **Metal
+(compatibility)**, the v3 renderer, for older devices or if anything looks wrong). It is about as light as v3 on the
+render thread and lighter on the GPU, and much lighter over a long session: lamp-lit roads and walls are drawn once
+instead of twice, the auto-brightness measurement takes half the passes, and the game's vertex buffers are no
+longer copied whole on every update. Temporal is now **Temporal (enhanced)** (Spatial stays the default) and keeps
+its history through menus and cut-scenes.
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.

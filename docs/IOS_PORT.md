@@ -101,7 +101,7 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
     at most 85% of the output (600p at 720p). A step above 5/6 of the output draws at 5/6 (v3, `upscale_begin`;
     v2.3 drew it native): the spatial scaler at a ratio near 1 (800p onto 900p, 9/8) left a grid of fine lines every
     1/(ratio-1) scene pixels, sharp where scene and output pixels line up and soft between.
-  - *Upscaler* (v3; next launch, with the restart card): Spatial or **Temporal (experimental)**, below.
+  - *Upscaler* (v3; next launch, with the restart card): Spatial (default) or **Temporal (enhanced)** (v4 name), below.
   - *Frame cap* 30/60/80/120 (v3: 80, not 90 — ProMotion runs at 120/80/60/40/30) with a ProMotion rate hint. The
     game's own limiter (`kit/runtime/frame_deadline.h`) paces any cap from 20 to 240 (it took only 40/60/120, so 80
     and 30 ran on the display's pacing alone and went over). 40 fps in the front end's menus and 30 while paused or
@@ -151,6 +151,28 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
 - First run on a fresh profile: Detail set to Low once (`seedFirstRun`).
 - The final stretch of the output to the screen (`compositor.cpp` + `shaders_msl.h` `compositor_sample`) is filtered
   on iOS when the scale is fractional (nearest sampling everywhere else, as before).
+
+### Metal 4 renderer (v4)
+
+The Direct3D 9 renderer encodes on a Metal 4 queue with MetalFX 4 scalers (plan and design: `docs/METAL4_PLAN.md`;
+wrappers `kit/host/gpu/metal/d3d9_encoders.h`). Diagnostics → *Renderer*: **Metal 4** (default) or **Metal
+(compatibility)** (the v3 path), next launch; a device without Metal 4 runs the v3 path by itself. One long-lived
+residency set holds every resource (and keeps it alive until the GPU is past it), argument-table entries are set
+only when they change, small constant blocks are reused, and barriers are precise (Diagnostics *Barriers: Safe* puts
+one before every pass). Pipelines are built once per shader pair and specialized per blend state (keyed by the
+vertex layout's contents). The efficiency work that came with it, for both renderers:
+
+- **Buffer locks** (`kit/dx/d3d9.cpp`): a Lock copies and uploads only the bytes locked (it copied the whole buffer
+  both ways), DISCARD and NOOVERWRITE reach the renderer, and a buffer the GPU still reads cycles through up to 128
+  replacements instead of making new ones (one 96 KB buffer is rewritten up to 34 times a frame).
+- **Pool fusion** for pixel shaders 1.x and wet roads: the lamp light is added in the same draw (85-99% of pool
+  draws fused, was ~2%); the blended ones stay two-pass.
+- **Exposure** (`effects/clean-chain.txt`, `tools/effects/gen_luma2.py`): the log and quartic luminance chains are
+  one RGBA32F chain (12 passes -> 6).
+- **Temporal history** resets when the game's cut-scene flag comes on, or on a jump, FOV change or a turn of more
+  than 30 degrees, not on every frame the flag is held.
+- The perf lines (`[gpu] perf ...`, every 600 frames) give the render thread's encode time, GPU time, draws, passes,
+  barriers, residency changes, new resources per frame and the buffers making them.
 
 ### Controller button icons
 
