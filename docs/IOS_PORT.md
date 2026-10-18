@@ -101,7 +101,7 @@ the panel's tabs use has a snapshot too (v2.1; it drew behind the Graphics, Mods
     at most 85% of the output (600p at 720p). A step above 5/6 of the output draws at 5/6 (v3, `upscale_begin`;
     v2.3 drew it native): the spatial scaler at a ratio near 1 (800p onto 900p, 9/8) left a grid of fine lines every
     1/(ratio-1) scene pixels, sharp where scene and output pixels line up and soft between.
-  - *Upscaler* (v3; next launch, with the restart card): Spatial (default) or **Temporal (enhanced)** (v4 name), below.
+  - *Upscaler* (v3; next launch, with the restart card): **Temporal** (default since v4.1) or Spatial (compatibility), below.
   - *Frame cap* 30/60/80/120 (v3: 80, not 90 — ProMotion runs at 120/80/60/40/30) with a ProMotion rate hint. The
     game's own limiter (`kit/runtime/frame_deadline.h`) paces any cap from 20 to 240 (it took only 40/60/120, so 80
     and 30 ran on the display's pacing alone and went over). 40 fps in the front end's menus and 30 while paused or
