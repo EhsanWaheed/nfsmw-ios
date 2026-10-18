@@ -1739,12 +1739,12 @@ class Renderer final : public D9Backend {
             b.spares.push_back(retired);
             // v4: as many spares as the buffer cycles through (a buffer the game rewrites n times a frame needs about
             // 3n with frames in flight): with 4, such buffers dropped a spare and made a new one every upload, and on
-            // Metal 4 each new one joins the residency set (commits ~2.9 ms a frame late in the owner's race). Up to 24,
-            // and 16 MB of spares per buffer.
+            // Metal 4 each new one joins the residency set (commits ~2.9 ms a frame late in the owner's race). Up to 64
+            // (the owner's race: one 96 KB buffer uploaded ~19 times a frame needs ~57), and 16 MB of spares per buffer.
             size_t spare_bytes = 0;
             for (const SpareBuf &s : b.spares)
                 spare_bytes += s.buffer.length;
-            while (b.spares.size() > 1 && (b.spares.size() > 24 || spare_bytes > (16u << 20))) {
+            while (b.spares.size() > 1 && (b.spares.size() > 64 || spare_bytes > (16u << 20))) {
                 spare_bytes -= b.spares.front().buffer.length;
                 b.spares.erase(b.spares.begin());
             }
