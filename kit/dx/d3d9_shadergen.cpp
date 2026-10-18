@@ -2918,7 +2918,7 @@ bool pixel_source(const Program &p, const PixelVariant &v, std::string *out, std
     if (v.pool) {   // Remaster run 10: the pool term samples stage 0 (diffuse) and, for pool 1, stage 1 (normal map) as 2D
         const uint32_t last = v.pool == 1 ? 1 : 0;
         for (uint32_t st = 0; st <= last; ++st)
-            if (p.major < 2 || g.is_depth(st) || g.kind_of(st) != S_2D) {
+            if (g.is_depth(st) || g.kind_of(st) != S_2D) {   // v4: 1.x too (kind from the bound textures)
                 if (why)
                     *why = "pool variant: stage 0 or 1 is not plain 2D";
                 return false;

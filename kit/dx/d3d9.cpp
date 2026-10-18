@@ -2054,8 +2054,15 @@ static int pool_ineligible(const D9Pipeline &pl, const d9sh::Program &vs, const 
             have |= in.usage == 0 ? 1u : in.usage == 3 ? 2u : in.usage == 5 ? 4u : in.usage == 6 ? 8u : 0u;
     if ((have & (mapped ? 15u : 7u)) != (mapped ? 15u : 7u))
         return POOL_INPUTS;
-    if (ps.major < 2)
-        return POOL_PS1;   // v4: counted apart from "samplers" (stage 0/1 not 2D): a pixel shader 1.x
+    // v4: pixel shaders 1.x fuse too (88% of the two-pass draws in the owner's races): the pool term samples stages
+    // 0/1 by the bound textures (checked 2D below) and adds to the saturated r0, as the native additive pass did.
+    // RECOMP_REMASTER_POOL_PS1=0 (TEST ONLY): two-pass for them as before.
+    static const bool ps1_off = [] {
+        const char *e = getenv("RECOMP_REMASTER_POOL_PS1");
+        return e && *e == '0';
+    }();
+    if (ps.major < 2 && ps1_off)
+        return POOL_PS1;
     for (uint32_t s = 0; s < (mapped ? 2u : 1u); ++s) {
         auto k = ps.samplers.find(s);
         if (k != ps.samplers.end() && k->second != d9sh::S_2D)
