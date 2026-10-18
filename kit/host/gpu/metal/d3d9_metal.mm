@@ -3242,10 +3242,11 @@ class Renderer final : public D9Backend {
         }
         auto pool_variant = [&](uint32_t form, bool minimal, d9msl::PixelVariant &pv, d9msl::VertexVariant &vv) {
             const uint16_t st = form == 1 ? 3u : 1u;   // the stages the pool form samples
-            if (form < 1 || form > 2 || (variant.depth_mask & st) || (variant.cube_mask & st) || pp.major < 2)
+            // v4: pixel shaders 1.x too (their stage kinds come from the bound textures); the wet road stays (its
+            // lines and the pool term share nothing: the wet base plus the pool light, as the native two passes)
+            if (form < 1 || form > 2 || (variant.depth_mask & st) || (variant.cube_mask & st))
                 return false;
             pv = variant;
-            pv.wetroad = 0;
             pv.parallax = 0;
             pv.roadsheen = 0;
             pv.soft = 0;
@@ -3403,8 +3404,13 @@ class Renderer final : public D9Backend {
                 if (host_d9_pool_state(pkey) == HOST_D9_POOL_UNKNOWN) {
                     const int force = pool_force();
                     int fail = force >= POOL_FORCE_REFUSE && force <= POOL_FORCE_PSO ? force : 0;
-                    // A wet-road program never fuses (the pool would replace its wet shading), whatever the A/B phase.
-                    if (!fail && wetroad_on_) {
+                    // v4: a wet-road program fuses with its wet shading kept (pool_variant); RECOMP_REMASTER_POOL_WET=0
+                    // (TEST ONLY) refuses it as before.
+                    static const bool wet_refuse = [] {
+                        const char *e = getenv("RECOMP_REMASTER_POOL_WET");
+                        return e && *e == '0';
+                    }();
+                    if (!fail && wetroad_on_ && wet_refuse) {
                         auto wr = wetroad_ps_.find(ps_key);
                         if (wr == wetroad_ps_.end())
                             wr = wetroad_ps_.emplace(ps_key, d9msl::pixel_is_wetroad(pp)).first;
