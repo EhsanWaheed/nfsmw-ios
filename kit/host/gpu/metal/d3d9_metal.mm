@@ -2769,6 +2769,9 @@ class Renderer final : public D9Backend {
         }
     }
     void draw(const HostD9Draw &d) override {
+        pt_label_ = d.label;   // v4 TEST: pass timing names a pass this draw opens after it
+        if (pt_frame_ && !pt_passes_.empty())
+            ++pt_passes_.back().draws;
         ++stat_calls_;
         if (perf_mark_ != presents_) {   // v4 step 0: this (the encoding) thread's CPU time, sampled once a frame
             perf_mark_ = presents_;
@@ -6615,6 +6618,22 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             rp.visibilityResultBuffer = vis_buffer();
             pass_vis_ = true;
         }
+        if (pt_frame_ && pt_passes_.size() < 256) {   // v4 TEST ONLY: pass timing
+            const NSUInteger k = pt_passes_.size();
+            rp.sampleBufferAttachments[0].sampleBuffer = pt_buf_;
+            rp.sampleBufferAttachments[0].startOfVertexSampleIndex = 2 * k;
+            rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+            rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+            rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = 2 * k + 1;
+            PtPass pp;
+            char sz[48];
+            snprintf(sz, sizeof sz, "%lux%lu", (unsigned long)(pass_color_[0] ? pass_color_[0].width >> t.color[0].level : 0),
+                     (unsigned long)(pass_color_[0] ? pass_color_[0].height >> t.color[0].level : 0));
+            pp.size = sz;
+            pp.label = pt_label_ ? pt_label_ : "(clear or ours)";
+            pt_label_ = nullptr;
+            pt_passes_.push_back(pp);
+        }
         enc_ = [cmd_ renderCommandEncoderWithDescriptor:rp];
         ++perf_passes_;
         if (trace_) {
@@ -6831,6 +6850,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         }
         cmd_ = new_cmd();
         ++serial_;
+        pt_frame_ = pt_on_ && !m4_ && serial_ % 30 == 0 && pt_ready();   // v4 TEST ONLY: pass timing
+        pt_passes_.clear();
         dispatch_semaphore_t sem = frames_;
         uint64_t serial = serial_;
         std::atomic<uint64_t> *done = &completed_;
@@ -6850,10 +6871,78 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
           dispatch_semaphore_signal(sem);
         }];
     }
+    bool pt_ready() {
+        if (pt_buf_ || pt_failed_)
+            return pt_buf_ != nil;
+        pt_failed_ = true;
+        if (![mtl_ supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+            fprintf(stderr, "[gpu] pass timing: this GPU has no stage-boundary counters\n");
+            return false;
+        }
+        id<MTLCounterSet> ts = nil;
+        for (id<MTLCounterSet> cs in mtl_.counterSets)
+            if ([cs.name isEqualToString:MTLCommonCounterSetTimestamp])
+                ts = cs;
+        if (!ts)
+            return false;
+        MTLCounterSampleBufferDescriptor *cd = [MTLCounterSampleBufferDescriptor new];
+        cd.counterSet = ts;
+        cd.storageMode = MTLStorageModeShared;
+        cd.sampleCount = 512;
+        NSError *error = nil;
+        pt_buf_ = [mtl_ newCounterSampleBufferWithDescriptor:cd error:&error];
+        if (!pt_buf_)
+            return false;
+        MTLTimestamp c = 0, g = 0;
+        [mtl_ sampleTimestamps:&c gpuTimestamp:&g];
+        pt_cpu0_ = c, pt_gpu0_ = g;
+        pt_failed_ = false;
+        fprintf(stderr, "[gpu] pass timing: on (one frame in 30)\n");
+        return true;
+    }
+    // The sampled frame's passes, resolved once the GPU is done: per pass end - start, in ms.
+    void pt_commit() {
+        if (!pt_frame_ || pt_passes_.empty())
+            return;
+        auto passes = std::make_shared<std::vector<PtPass>>(std::move(pt_passes_));
+        pt_passes_.clear();
+        pt_frame_ = false;
+        id<MTLCounterSampleBuffer> buf = pt_buf_;
+        id<MTLDevice> dev = mtl_;
+        const uint64_t c0 = pt_cpu0_, g0 = pt_gpu0_;
+        [cmd_ addDone:^(NSError *error, double gpu_s) {
+          if (error)
+              return;
+          NSData *data = [buf resolveCounterRange:NSMakeRange(0, 2 * passes->size())];
+          if (!data || data.length < 2 * passes->size() * sizeof(MTLCounterResultTimestamp))
+              return;
+          MTLTimestamp c1 = 0, g1 = 0;
+          [dev sampleTimestamps:&c1 gpuTimestamp:&g1];
+          const double tick_ns = (g1 > g0 && c1 > c0) ? (double)(c1 - c0) / (double)(g1 - g0) : 1.0;
+          const MTLCounterResultTimestamp *t = (const MTLCounterResultTimestamp *)data.bytes;
+          std::lock_guard<std::mutex> lock(pt_mutex_);
+          double render = 0.0;
+          for (size_t i = 0; i < passes->size(); ++i) {
+              const uint64_t a = t[2 * i].timestamp, b = t[2 * i + 1].timestamp;
+              if (a == MTLCounterErrorValue || b == MTLCounterErrorValue || b < a)
+                  continue;
+              const double ms = (double)(b - a) * tick_ns / 1e6;
+              const PtPass &p = (*passes)[i];
+              auto &s = pt_sum_[(p.label.empty() ? std::string("(no draws)") : p.label) + " " + p.size];
+              s.first += ms;
+              ++s.second;
+              render += ms;
+          }
+          pt_render_ms_ += render;
+          pt_gpu_ms_ += gpu_s * 1e3;
+          ++pt_frames_;
+        }];
+    }
     void flush() {
         if (!cmd_)
             return;
         end_pass();
+        pt_commit();
         if (vis_) {
             vis_pool_.emplace_back(vis_, serial_);
             vis_ = nil;
@@ -7802,6 +7891,21 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             for (auto &kv : buffers_)
                 kv.second.win_uploads = kv.second.win_spares = kv.second.win_replaced = 0, kv.second.win_copied = 0;
         }
+        if (pt_on_) {   // v4 TEST ONLY: pass timing, the 10 costliest per frame
+            std::lock_guard<std::mutex> lock(pt_mutex_);
+            if (pt_frames_) {
+                std::vector<std::pair<std::string, std::pair<double, uint64_t>>> v(pt_sum_.begin(), pt_sum_.end());
+                std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second.first > b.second.first; });
+                fprintf(stderr, "[gpu] pass timing (%llu frames): render passes %.2f ms of GPU %.2f ms per frame; costliest:\n",
+                        (unsigned long long)pt_frames_, pt_render_ms_ / pt_frames_, pt_gpu_ms_ / pt_frames_);
+                for (size_t i = 0; i < std::min<size_t>(10, v.size()); ++i)
+                    fprintf(stderr, "[gpu]   %6.2f ms  x%.1f  %s\n", v[i].second.first / pt_frames_,
+                            (double)v[i].second.second / pt_frames_, v[i].first.c_str());
+            }
+            pt_sum_.clear();
+            pt_frames_ = 0;
+            pt_render_ms_ = pt_gpu_ms_ = 0.0;
+        }
         perf_last_cpu_ns_ = perf_enc_cpu_ns_;
         perf_last_draws_ = draws_;
         perf_last_t_ = now;
@@ -7915,6 +8019,23 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     id<MTLBuffer> transient_ = nil;
     NSUInteger transient_used_ = 0;
     std::vector<SpareBuf> transient_pool_;      // v4: full transient buffers, reused once their frame is done
+    // v4 TEST ONLY (RECOMP_PASS_TIMING=1, classic Metal): the GPU time of each render pass on one frame in 30 (stage
+    // boundary timestamps: start of vertex, end of fragment), named by the pass's first draw and its target size;
+    // the perf line lists the costliest. The 3-in-flight frames never reuse the samples (30 apart).
+    const bool pt_on_ = [] { const char *e = getenv("RECOMP_PASS_TIMING"); return e && *e == '1'; }();
+    id<MTLCounterSampleBuffer> pt_buf_ = nil;
+    bool pt_failed_ = false, pt_frame_ = false;
+    const char *pt_label_ = nullptr;   // the draw in progress (a pass it opens takes its name)
+    uint64_t pt_cpu0_ = 0, pt_gpu0_ = 0;
+    struct PtPass {
+        std::string size, label;
+        uint32_t draws = 0;
+    };
+    std::vector<PtPass> pt_passes_;
+    std::mutex pt_mutex_;
+    std::unordered_map<std::string, std::pair<double, uint64_t>> pt_sum_;   // key -> (ms, passes), under pt_mutex_
+    double pt_render_ms_ = 0.0, pt_gpu_ms_ = 0.0;
+    uint64_t pt_frames_ = 0;
     uint64_t perf_alloc_prev_[AS_COUNT] = {};   // alloc_[site].count at the last perf line
     id<MTLTexture> white_ = nil, white_cube_ = nil, white_depth_ = nil, white_volume_ = nil;
     std::vector<uint8_t> scratch_;

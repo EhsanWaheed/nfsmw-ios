@@ -1,6 +1,15 @@
 # pop_ios_bundle(<target>): an iPad app under build/ios, signed automatically by
 # Xcode with RECOMP_IOS_TEAM, carrying the game files under game/.
 function(pop_ios_bundle target)
+  # The version LiveContainer / Settings show (v4: was a fixed 0.1) and the build number (commits in the checkout).
+  if(NOT RECOMP_APP_VERSION)
+    set(RECOMP_APP_VERSION "4.1")
+  endif()
+  execute_process(COMMAND git rev-list --count HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                  OUTPUT_VARIABLE RECOMP_APP_BUILD OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(NOT RECOMP_APP_BUILD)
+    set(RECOMP_APP_BUILD "1")
+  endif()
   configure_file(${POP_ROOT}/host/Info-ios.plist.in ${CMAKE_BINARY_DIR}/generated/Info-ios.plist @ONLY)
   set_target_properties(${target} PROPERTIES
     MACOSX_BUNDLE ON

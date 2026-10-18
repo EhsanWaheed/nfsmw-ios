@@ -8,8 +8,8 @@
     <key>CFBundleName</key><string>@RECOMP_APP_NAME@</string>
     <key>CFBundleDisplayName</key><string>@RECOMP_GAME_NAME@</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>@RECOMP_APP_VERSION@</string>
+    <key>CFBundleVersion</key><string>@RECOMP_APP_BUILD@</string>
     <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>MinimumOSVersion</key><string>17.0</string>
