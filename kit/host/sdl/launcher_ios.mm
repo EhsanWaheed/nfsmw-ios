@@ -7,10 +7,12 @@
 #include "../launcher/launcher_sdl.h"
 
 #import <GameController/GameController.h>
+#import <QuartzCore/CAMetalLayer.h>
 #import <UIKit/UIKit.h>
 
 #include <SDL3/SDL.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -485,11 +487,49 @@ int pad_family() {
 
 namespace {
 
+// Logs every visible view over the game (shown and not transparent, with a size), the Metal layer's setup and the
+// app's other windows: the HUD's "Composited" means one of these is drawn over the game, or the layer itself is not a
+// plain opaque full-screen one.
+void log_over_game(UIWindow *w, double t) {
+    if (!w)
+        return;
+    std::string over;
+    int n = 0;
+    std::vector<UIView *> stack{w};
+    while (!stack.empty()) {
+        UIView *v = stack.back();
+        stack.pop_back();
+        if (v.hidden || v.alpha < 0.01 || v.bounds.size.width < 1 || v.bounds.size.height < 1)
+            continue;
+        if ([v.layer isKindOfClass:[CAMetalLayer class]]) {
+            CAMetalLayer *m = (CAMetalLayer *)v.layer;
+            const CGSize b = v.bounds.size, d = m.drawableSize;
+            fprintf(stderr, "[ui] t+%.0fs game layer: %.0fx%.0f pt x%.1f, drawable %.0fx%.0f, opaque %d, framebufferOnly %d\n",
+                    t, b.width, b.height, m.contentsScale, d.width, d.height, (int)m.opaque, (int)m.framebufferOnly);
+        } else if (v != w && v != w.rootViewController.view && n++ < 12) {
+            char line[200];
+            const CGRect f = [v convertRect:v.bounds toView:w];
+            snprintf(line, sizeof line, " %s %.0fx%.0f@%.0f,%.0f a%.2f;", NSStringFromClass([v class]).UTF8String,
+                     f.size.width, f.size.height, f.origin.x, f.origin.y, v.alpha);
+            over += line;
+        }
+        for (UIView *s in v.subviews)
+            stack.push_back(s);
+    }
+    int windows = 0;
+    for (UIWindow *o in w.windowScene.windows)
+        if (o != w && !o.hidden)
+            windows++;
+    fprintf(stderr, "[ui] t+%.0fs visible views (%d):%s other windows %d\n", t, n, over.empty() ? " none;" : over.c_str(),
+            windows);
+}
+
 class IosLauncherView final : public launcher::NativeView {
   public:
     explicit IosLauncherView(SDL_Window *window) {
         UIWindow *w = (__bridge UIWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window),
                                                                   SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+        window_ = w;
         UIView *host = w.rootViewController.view ?: w;
         view_ = [[RecompLauncherView alloc] initWithFrame:host.bounds];
         [host addSubview:view_];
@@ -503,17 +543,20 @@ class IosLauncherView final : public launcher::NativeView {
         v.model = nullptr;
         if (quit)
             exit(0);   // iOS: nothing else ends the app from the launcher
-        [UIView animateWithDuration:0.3
-            animations:^{
-              v.alpha = 0;
-            }
-            completion:^(BOOL) {
-              [v removeFromSuperview];
-            }];
+        // v4.2: out of the hierarchy at once (was a 0.3 s fade whose completion could be left pending): any visible
+        // layer over the game's Metal layer makes iOS composite every frame instead of showing it directly
+        [v.layer removeAllAnimations];
+        [v removeFromSuperview];
+        UIWindow *w = window_;
+        for (double t : {8.0, 90.0})
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+              log_over_game(w, t);
+            });
     }
 
   private:
     RecompLauncherView *view_ = nil;
+    __weak UIWindow *window_ = nil;
 };
 
 } // namespace
