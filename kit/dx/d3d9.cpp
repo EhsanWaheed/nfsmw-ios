@@ -1210,10 +1210,12 @@ static void gpu_sync_buffer(ComObj *b) {
         // v4: every write since the last upload was NOOVERWRITE: the renderer may write in place (D3D9's promise
         // that no queued draw reads those bytes), no replacement buffer
         host_d9_buffer_upload_flags(b->id, (uint32_t)b->blob.size(), m.dirty_lo, b->blob.data() + m.dirty_lo,
-                                    hi - m.dirty_lo, b->buf_noov ? HOST_D9_UPLOAD_NOOVERWRITE : 0u);
+                                    hi - m.dirty_lo, (b->buf_noov ? HOST_D9_UPLOAD_NOOVERWRITE : 0u) |
+                                                         (b->buf_discard ? HOST_D9_UPLOAD_DISCARD : 0u));
     }
     m.dirty_lo = m.dirty_hi = 0;
     b->buf_noov = true;
+    b->buf_discard = false;
 }
 static void gpu_forget(ComObj *o) {
     o->gpu_mirror = nullptr;
@@ -2680,6 +2682,8 @@ static void buffer_lock(X86 *c) {
     }
     if (!(flags & 0x2000u))   // D3DLOCK_DISCARD
         memcpy(gm_ptr(ptr), o->blob.data() + offset, size);
+    else
+        o->buf_discard = true;
     o->buf_locks.push_back({ptr, offset, offset + size});
     ++o->lock_count;
     if (!(flags & 0x10u))   // D3DLOCK_READONLY: nothing to upload

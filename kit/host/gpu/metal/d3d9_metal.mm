@@ -189,6 +189,8 @@ struct Buf {
     uint64_t used = 0;
     uint32_t generation = 0, revision = 0;
     std::vector<SpareBuf> spares;
+    uint32_t win_uploads = 0, win_spares = 0, win_replaced = 0;   // v4 diagnostics, since the last perf line
+    uint64_t win_copied = 0;                                       // bytes copied into replacements
 };
 
 MTLBlendFactor blend_factor(uint32_t b, bool alpha) {
@@ -1671,11 +1673,15 @@ class Renderer final : public D9Backend {
                 return;
             }
         }
+        upload_discard_ = (flags & HOST_D9_UPLOAD_DISCARD) != 0;
         buffer_upload(id, total, offset, bytes, size);
+        upload_discard_ = false;
     }
+    bool upload_discard_ = false;   // the upload in progress follows a DISCARD Lock
     void buffer_upload(uint32_t id, uint32_t total, uint32_t offset, const uint8_t *bytes,
                        uint32_t size) override {
         Buf &b = buffers_[id];
+        ++b.win_uploads;
         if (offset + size > total || !bytes)
             return;
         if (trace_)
@@ -1711,18 +1717,24 @@ class Renderer final : public D9Backend {
                     pick = i;
                     break;
                 }
+            ++b.win_replaced;
             if (pick < b.spares.size()) {
                 SpareBuf s = b.spares[pick];
                 b.spares.erase(b.spares.begin() + (ptrdiff_t)pick);
-                if (s.hi > s.lo)
-                    memcpy((uint8_t *)s.buffer.contents + s.lo, b.shadow.data() + s.lo,
-                           s.hi - s.lo);
+                // v4: after a DISCARD only the written bytes are defined: copy those, not all since set aside
+                const uint32_t lo = upload_discard_ ? offset : s.lo, hi = upload_discard_ ? end : s.hi;
+                if (hi > lo) {
+                    memcpy((uint8_t *)s.buffer.contents + lo, b.shadow.data() + lo, hi - lo);
+                    b.win_copied += hi - lo;
+                }
                 b.buffer = s.buffer;
             } else {
                 b.buffer = [mtl_ newBufferWithBytes:b.shadow.data()
                                              length:std::max<size_t>(b.shadow.size(), 4)
                                             options:MTLResourceStorageModeShared];
                 note_alloc(AS_BUFFER_SPARE, b.buffer, b.shadow.size(), id, 1, 0);
+                ++b.win_spares;
+                b.win_copied += b.shadow.size();
             }
             b.spares.push_back(retired);
             // v4: as many spares as the buffer cycles through (a buffer the game rewrites n times a frame needs about
@@ -7760,6 +7772,28 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     n[AS_BUFFER], n[AS_BUFFER_SPARE], n[AS_TRANSIENT], n[AS_TEXTURE],
                     n[AS_MSAA] + n[AS_READBACK] + n[AS_KEPT] + n[AS_FITTED_DEPTH], in_place_uploads_ / frames);
             in_place_uploads_ = 0;
+        }
+        {   // v4: the buffers that made the most new spares (size, uploads, replacements, new spares, bytes copied)
+            std::vector<std::pair<uint32_t, Buf *>> top;
+            for (auto &kv : buffers_) {
+                if (kv.second.win_spares)
+                    top.push_back({kv.first, &kv.second});
+            }
+            std::partial_sort(top.begin(), top.begin() + std::min<size_t>(3, top.size()), top.end(),
+                              [](const auto &a, const auto &b) { return a.second->win_spares > b.second->win_spares; });
+            std::string line;
+            for (size_t i = 0; i < std::min<size_t>(3, top.size()); ++i) {
+                const Buf &b = *top[i].second;
+                char t[200];
+                snprintf(t, sizeof t, "%s#%u %u KB: uploads %.1f, replaced %.1f, new spares %.1f, copied %.0f KB, held %zu",
+                         i ? "; " : "", top[i].first, (unsigned)(b.shadow.size() >> 10), b.win_uploads / frames,
+                         b.win_replaced / frames, b.win_spares / frames, b.win_copied / 1024.0 / frames, b.spares.size());
+                line += t;
+            }
+            if (!line.empty())
+                fprintf(stderr, "[gpu] perf buffers making spares (per frame): %s\n", line.c_str());
+            for (auto &kv : buffers_)
+                kv.second.win_uploads = kv.second.win_spares = kv.second.win_replaced = 0, kv.second.win_copied = 0;
         }
         perf_last_cpu_ns_ = perf_enc_cpu_ns_;
         perf_last_draws_ = draws_;

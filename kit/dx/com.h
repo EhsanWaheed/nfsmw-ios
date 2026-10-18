@@ -282,7 +282,7 @@ struct ComObj {
         uint32_t ptr = 0, lo = 0, hi = 0;
     };
     std::vector<BufLock> buf_locks;
-    bool buf_noov = true, buf_written = false;
+    bool buf_noov = true, buf_written = false, buf_discard = false;   // buf_discard: a DISCARD Lock since the upload
     // Once handed a writable Lock pointer, the guest may keep using it forever.
     bool retained_pointer = false;
     bool is_primary = false;
