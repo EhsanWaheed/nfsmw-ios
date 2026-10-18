@@ -1,6 +1,6 @@
 ps_3_0
 ; Mirror grade + glass (run 13; review/run13/mirror-parity-design.md M1/M2). Our own program.
-; s0 = MirrorCopy (point), s1 = AdaptHistory.cur (point), s2 = Q4Moment (point). c87 MirrorParams = (grade 0/1,
+; s0 = MirrorCopy (point), s1 = AdaptHistory.cur (point), s2 = LogMean (point; .y the quartic moment). c87 MirrorParams = (grade 0/1,
 ; glass 0..1, mirror width px, mirror height px). Grade: the main view's exposure gain (same model and clamp as
 ; PS_ExposureBloom, no bloom) and the finish shadow lift (FinishShadowShape, FinishParams.y). Glass: cool tint
 ; (0.97, 0.985, 1.0) at 100 %, 6 % rounded-rect edge darkening over the outer 4 % of the width, 1-px top highlight.
@@ -15,6 +15,7 @@ texld r0.xyzw, v0.xyyy, s0.xyzw
 mov r8.xyzw, c92.xxxx
 texld r1.xyzw, r8.xyyy, s1.xyzw
 texld r2.xyzw, r8.xyyy, s2.xyzw
+mov r2.x, r2.y
 max r2.x, r2.xxxx, c92.yyyy
 log r2.x, r2.xxxx
 mul r2.x, r2.xxxx, c92.wwww

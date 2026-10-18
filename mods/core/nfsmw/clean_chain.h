@@ -263,7 +263,8 @@ static int cc_parse(const PopModApi *api, char *fxname, size_t fxn) {
             t->history = tok[0][0] == 'h';
             if (!strcmp(tok[2], "argb8")) t->fmt = 21;
             else if (!strcmp(tok[2], "r32f")) t->fmt = 114;
-            else { ok = cc_fail_load("format must be argb8 or r32f", ln); break; }
+            else if (!strcmp(tok[2], "rgba32f")) t->fmt = 116;   /* v4: the merged exposure statistics (x log, y quartic) */
+            else { ok = cc_fail_load("format must be argb8, r32f or rgba32f", ln); break; }
             t->f16 = nt == 5;                                   /* item 10: RGBA16F only in the HDR form */
             if (t->f16 && g_cc_hdr) t->fmt = 113;
             if (!strcmp(tok[3], "frame")) t->div = 1;

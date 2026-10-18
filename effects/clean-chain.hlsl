@@ -25,6 +25,8 @@
 // technique clean_luma_log16:     vs=VS_Pass ps=PS_LumaLog16
 // technique clean_luma_quartic16: vs=VS_Pass ps=PS_LumaQuartic16
 // technique clean_reduce16:   vs=VS_Pass ps=PS_Reduce16
+// technique clean_luma_both16: vs=VS_Pass ps=PS_LumaBoth16   (v4: tools/effects/gen_luma2.py; x log, y quartic)
+// technique clean_reduce16x2: vs=VS_Pass ps=PS_Reduce16x2    (v4: PS_Reduce16 on x and y)
 // technique clean_adapt:      vs=VS_Pass ps=PS_Adapt
 // technique clean_exposure:       vs=VS_Pass ps=PS_Exposure
 // technique clean_bright:         vs=VS_Pass ps=PS_Bright

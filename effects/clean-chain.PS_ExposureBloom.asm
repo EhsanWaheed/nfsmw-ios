@@ -34,6 +34,7 @@ mov r0.x, r0.zxxx
 mov r7.z, r0.x
 mov r0.xy, c28.zwxx
 texld r0.xyzw, r0.xyxx, s3.xyzw
+mov r0.x, r0.y
 mov r7.w, r6.x
 mov r7.w, r7.w
 mov r8.x, c29.x

@@ -22,6 +22,7 @@ mov r4.xy, c28.xyxx
 texld r4.xyzw, r4.xyxx, s1.xyzw
 mov r5.xy, c28.zwxx
 texld r5.xyzw, r5.xyxx, s3.xyzw
+mov r5.x, r5.y
 mov r6.x, r4.x
 mov r6.y, c29.x
 mov r6.x, -r6.x

@@ -14,12 +14,12 @@ effect clean-chain.fx
 # the `; hdr:` forms) and makes targets flagged `f16` as RGBA16F; otherwise the flag is ignored.
 
 # --- Module A: log-average luminance + temporal adaptation ---
-target Luma4    r32f frame/4
-target Luma16   r32f frame/16
-target Luma64   r32f frame/64
-target Luma128  r32f frame/128
-target LumaGrid r32f 4x4
-target LogMean  r32f 1x1
+target Luma4    rgba32f frame/4
+target Luma16   rgba32f frame/16
+target Luma64   rgba32f frame/64
+target Luma128  rgba32f frame/128
+target LumaGrid rgba32f 4x4
+target LogMean  rgba32f 1x1
 history AdaptHistory r32f 1x1
 
 const LumaParams  0.0001,0,0,0
@@ -36,12 +36,6 @@ const ExposureModel 1.27479958,-2.40261516,-1.12322615,0.50
 const ExposureClamp 0.50,2.00,0.001,0
 
 # Pixelwise fourth moment -> quartic mean Q4.
-target Q4_4      r32f frame/4
-target Q4_16     r32f frame/16
-target Q4_64     r32f frame/64
-target Q4_128    r32f frame/128
-target Q4Grid    r32f 4x4
-target Q4Moment  r32f 1x1
 
 # --- Module B: unchanged from Drop 2 ---
 const BloomParams     0.18,0.80,0.10,0.02
@@ -137,22 +131,16 @@ pass clean_ao_apply -> frame s0=AoA:linear s1=frame:point s2=depth:point blend=o
 recopy ao
 
 # A1-A6
-pass clean_luma_log16 -> Luma4 s0=frame:point blend=off write=r
-pass clean_reduce16 -> Luma16   s0=Luma4:point    blend=off write=r
-pass clean_reduce16 -> Luma64   s0=Luma16:point   blend=off write=r
-pass clean_reduce16 -> Luma128  s0=Luma64:point   blend=off write=r
-pass clean_reduce16 -> LumaGrid s0=Luma128:point  blend=off write=r
-pass clean_reduce16 -> LogMean  s0=LumaGrid:point blend=off write=r
+# v4: one chain for A and C (x mean log luminance, y mean quartic luminance; the frame read once): 6 passes, was 12
+pass clean_luma_both16 -> Luma4 s0=frame:point blend=off write=rgba
+pass clean_reduce16x2 -> Luma16   s0=Luma4:point    blend=off write=rgba
+pass clean_reduce16x2 -> Luma64   s0=Luma16:point   blend=off write=rgba
+pass clean_reduce16x2 -> Luma128  s0=Luma64:point   blend=off write=rgba
+pass clean_reduce16x2 -> LumaGrid s0=Luma128:point  blend=off write=rgba
+pass clean_reduce16x2 -> LogMean  s0=LumaGrid:point blend=off write=rgba
 pass clean_adapt -> AdaptHistory.cur s0=LogMean:point s1=AdaptHistory.prev:point blend=off write=r
 
-# C1-C6: instantaneous quartic-luminance statistic.
-# The same scalar reducer is reused after the first pixelwise Y^4 pass.
-pass clean_luma_quartic16 -> Q4_4 s0=frame:point blend=off write=r
-pass clean_reduce16 -> Q4_16   s0=Q4_4:point    blend=off write=r
-pass clean_reduce16 -> Q4_64   s0=Q4_16:point   blend=off write=r
-pass clean_reduce16 -> Q4_128  s0=Q4_64:point   blend=off write=r
-pass clean_reduce16 -> Q4Grid  s0=Q4_128:point  blend=off write=r
-pass clean_reduce16 -> Q4Moment s0=Q4Grid:point blend=off write=r
+# C1-C6: the quartic-luminance statistic is LogMean.y (merged into A1-A6 above, v4).
 
 # B1-B3 unchanged.
 pass clean_bright -> BloomBright s0=frame:linear s1=AdaptHistory.cur:point blend=off write=rgba
@@ -161,9 +149,9 @@ pass clean_blur_v -> BloomV s0=BloomH:linear blend=off write=rgba
 
 # Final C + B composite.
 # s3 supplies the quartic moment; the shader takes the fourth root internally.
-pass clean_exposure_bloom -> FinishInput s0=frame:point s1=AdaptHistory.cur:point s2=BloomV:linear s3=Q4Moment:point blend=off write=rgba alt=GradeInput grade=off,pc
+pass clean_exposure_bloom -> FinishInput s0=frame:point s1=AdaptHistory.cur:point s2=BloomV:linear s3=LogMean:point blend=off write=rgba alt=GradeInput grade=off,pc
 pass clean_grade -> FinishInput s0=GradeInput:point s1=GradeLut:linear blend=off write=rgba grade=pc
-pass clean_exposure -> GradeInput s0=frame:point s1=AdaptHistory.cur:point s3=Q4Moment:point blend=off write=rgba grade=vt
+pass clean_exposure -> GradeInput s0=frame:point s1=AdaptHistory.cur:point s3=LogMean:point blend=off write=rgba grade=vt
 pass clean_grade_down -> GradeLuma s0=GradeInput:linear blend=off write=rgba grade=vt
 pass clean_grade_vt -> FinishInput s0=GradeInput:point s1=GradeLuma:linear s2=BloomV:linear blend=off write=rgba grade=vt
 
@@ -240,4 +228,4 @@ pass clean_glow_add -> frame s0=GlowA:linear blend=add write=rgb
 # surface is copied into the first `mirror`-size target (made only while a mirror setting is on), then the mirror=1
 # passes draw. Host input: MirrorParams = (grade on, glass 0..1, mirror width, mirror height).
 target MirrorCopy argb8 mirror
-pass clean_mirror_grade -> mirror s0=MirrorCopy:point s1=AdaptHistory.cur:point s2=Q4Moment:point blend=off write=rgb mirror=1
+pass clean_mirror_grade -> mirror s0=MirrorCopy:point s1=AdaptHistory.cur:point s2=LogMean:point blend=off write=rgb mirror=1
