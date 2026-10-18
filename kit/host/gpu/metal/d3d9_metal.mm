@@ -6921,10 +6921,17 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
           const double tick_ns = (g1 > g0 && c1 > c0) ? (double)(c1 - c0) / (double)(g1 - g0) : 1.0;
           const MTLCounterResultTimestamp *t = (const MTLCounterResultTimestamp *)data.bytes;
           std::lock_guard<std::mutex> lock(pt_mutex_);
+          // Passes overlap on the GPU (the next pass's vertex work starts before the last one's fragments end), so
+          // each is charged from the later of its start and the previous end to its end: the parts add up to the frame.
           double render = 0.0;
+          uint64_t prev_end = 0;
           for (size_t i = 0; i < passes->size(); ++i) {
-              const uint64_t a = t[2 * i].timestamp, b = t[2 * i + 1].timestamp;
-              if (a == MTLCounterErrorValue || b == MTLCounterErrorValue || b < a)
+              const uint64_t a0 = t[2 * i].timestamp, b = t[2 * i + 1].timestamp;
+              if (a0 == MTLCounterErrorValue || b == MTLCounterErrorValue || b < a0)
+                  continue;
+              const uint64_t a = std::max(a0, prev_end);
+              prev_end = std::max(prev_end, b);
+              if (b <= a)
                   continue;
               const double ms = (double)(b - a) * tick_ns / 1e6;
               const PtPass &p = (*passes)[i];
