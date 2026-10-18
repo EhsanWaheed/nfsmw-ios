@@ -438,8 +438,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     if (_visibleApplied || _phaseApplied == 3) {
         cap = std::min(cap, 30);
         why = _visibleApplied ? " (panel open)" : " (paused)";
-    } else if (_phaseApplied == 1 && cap > 40) {
-        cap = 40;
+    } else if (_phaseApplied == 1 && cap > 30) {
+        // v4.2 (owner 18 Oct): 30 in every front-end screen (main menu, career garage, shops, car lots: anything that
+        // is not the open world or a race) so the phone recovers between races; was 40
+        cap = 30;
         why = " (menus)";
     }
     mods_display_set_fps_override(cap); // the game's Present deadline and the presenter's pacing

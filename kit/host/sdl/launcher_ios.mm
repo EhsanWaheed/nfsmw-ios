@@ -31,6 +31,26 @@ bool controller_in_use() {
     return GCController.controllers.count > 0 || GCKeyboard.coalescedKeyboard != nil;
 }
 
+// The connected controller's family, by the same rules as the panel (ios_overlay.mm controller_kind): 1 PlayStation
+// (DualSense, DualShock, PlayStation-edition controllers such as the Backbone One PlayStation Edition), 2 any other
+// controller (Xbox letters), 0 none (a keyboard alone).
+int pad_family() {
+    GCController *c = GCController.current ?: GCController.controllers.firstObject;
+    if (!c)
+        return 0;
+    NSString *cat = c.productCategory ?: @"";
+    if ([cat isEqualToString:GCProductCategoryDualSense] || [cat isEqualToString:GCProductCategoryDualShock4])
+        return 1;
+    GCExtendedGamepad *pad = c.extendedGamepad;
+    if ([pad isKindOfClass:GCDualSenseGamepad.class] || [pad isKindOfClass:GCDualShockGamepad.class])
+        return 1;
+    NSString *name = [NSString stringWithFormat:@"%@ %@", c.vendorName ?: @"", cat].lowercaseString;
+    for (NSString *word in @[ @"playstation", @"dualsense", @"dualshock", @"ps5", @"ps4" ])
+        if ([name containsString:word])
+            return 1;
+    return 2;
+}
+
 } // namespace
 
 @interface RecompLauncherView : UIView
@@ -53,6 +73,7 @@ bool controller_in_use() {
 @property(nonatomic) int shownScreen;
 @property(nonatomic) int focus;
 @property(nonatomic) BOOL compact;   // a phone in landscape (under 520 points tall): smaller type and buttons
+@property(nonatomic) int lastFocus;  // the launcher's focus as last shown (a controller connecting redraws it)
 @end
 
 @implementation RecompLauncherView {
@@ -237,6 +258,10 @@ bool controller_in_use() {
     // the gradient follows the view's size
     self.layer.name = @"launcher";
     shadeView.layer.name = @"shade";
+    for (NSNotificationName n in @[ GCControllerDidConnectNotification, GCControllerDidDisconnectNotification,
+                                     GCControllerDidBecomeCurrentNotification, GCKeyboardDidConnectNotification,
+                                     GCKeyboardDidDisconnectNotification ])
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(controllersChanged:) name:n object:nil];
     self.alpha = 0;
     [UIView animateWithDuration:0.45 animations:^{
       self.alpha = 1;
@@ -377,24 +402,8 @@ bool controller_in_use() {
     }
     [self showFocus:v.focus];
 
-    // hints: the controller's buttons when one is in use
-    if (controller_in_use()) {
-        NSMutableAttributedString *h = [NSMutableAttributedString new];
-        auto glyph = [&](NSString *name, NSString *text) {
-            NSTextAttachment *a = [NSTextAttachment textAttachmentWithImage:
-                                                        [[UIImage systemImageNamed:name] imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.7]
-                                                                                              renderingMode:UIImageRenderingModeAlwaysOriginal]];
-            [h appendAttributedString:[NSAttributedString attributedStringWithAttachment:a]];
-            [h appendAttributedString:[[NSAttributedString alloc] initWithString:text]];
-        };
-        glyph(@"a.circle.fill", @" Select     ");
-        glyph(@"b.circle.fill", @" Back     ");
-        glyph(@"dpad.fill", @" Move");
-        self.hintLabel.attributedText = h;
-        self.hintLabel.hidden = NO;
-    } else {
-        self.hintLabel.hidden = YES;
-    }
+    self.lastFocus = v.focus;
+    [self refreshHints];
     if (v.countdown > 0) {
         self.detailLabel.text = controller_in_use() ? @"Press any button to stay on this screen."
                                                     : @"Tap anywhere to stay on this screen.";
@@ -402,10 +411,52 @@ bool controller_in_use() {
     }
 }
 
+// The hints at the bottom, in the connected controller's own glyphs: PlayStation cross / circle in their colours,
+// otherwise A / B; a keyboard alone gets Return / Esc. None for touch alone.
+- (void)refreshHints {
+    const int family = pad_family();
+    if (!controller_in_use()) {
+        self.hintLabel.hidden = YES;
+        return;
+    }
+    NSMutableAttributedString *h = [NSMutableAttributedString new];
+    UIColor *dim = [UIColor colorWithWhite:1 alpha:0.7];
+    auto glyph = [&](NSString *name, UIColor *colour, NSString *text) {
+        UIImage *img = [[UIImage systemImageNamed:name] imageWithTintColor:colour renderingMode:UIImageRenderingModeAlwaysOriginal];
+        if (img)
+            [h appendAttributedString:[NSAttributedString attributedStringWithAttachment:[NSTextAttachment textAttachmentWithImage:img]]];
+        [h appendAttributedString:[[NSAttributedString alloc] initWithString:text]];
+    };
+    if (family == 1) {   // PlayStation: cross selects, circle goes back
+        glyph(@"xmark.circle.fill", [UIColor colorWithRed:0.49 green:0.69 blue:0.97 alpha:1], @" Select     ");
+        glyph(@"circle.circle.fill", [UIColor colorWithRed:0.95 green:0.39 blue:0.43 alpha:1], @" Back     ");
+        glyph(@"dpad.fill", dim, @" Move");
+    } else if (family == 2) {
+        glyph(@"a.circle.fill", dim, @" Select     ");
+        glyph(@"b.circle.fill", dim, @" Back     ");
+        glyph(@"dpad.fill", dim, @" Move");
+    } else {
+        glyph(@"return", dim, @" Select     ");
+        glyph(@"escape", dim, @" Back     ");
+        glyph(@"arrow.up.arrow.down", dim, @" Move");
+    }
+    self.hintLabel.attributedText = h;
+    self.hintLabel.hidden = NO;
+}
+
+// A controller connected or went away: its glyphs and the focus ring follow at once.
+- (void)controllersChanged:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self refreshHints];
+      self.focus = -2;   // force the ring to be re-evaluated
+      [self showFocus:self.lastFocus];
+    });
+}
+
 // The controller's focus: the focused button lifts a little and gets a white ring; none for touch alone.
 - (void)showFocus:(int)focus {
     const bool show = controller_in_use();
-    if (focus == self.focus && show == (self.focus >= 0))
+    if (focus == self.focus && show == (self.focus >= 0) && self.focus != -2)
         return;
     self.focus = show ? focus : -1;
     [UIView animateWithDuration:0.18
