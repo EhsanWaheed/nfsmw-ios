@@ -1069,6 +1069,58 @@ static bool motion_vs_patch(std::string *s) {
     return motion_varyings(s);
 }
 // colour 1 = (previous - current) in UV units (x right, y down), or x = 60000 (no previous position: the camera pass).
+// v4.1 sharper textures with MetalFX temporal: every 2D / cube sample of the jittered scene (the motion variant) gets
+// bias(d9_tmp.x), the scene's mip bias from fragment buffer 4 (log2(scene / output), set per draw by the renderer).
+// Samples with their own level, bias or gradient are left alone.
+static bool motion_lod_bias(std::string *s) {
+    static const char kP[] = "constant D9PSParams &P [[buffer(1)]]";
+    const size_t p = s->find(kP);
+    if (p == std::string::npos || s->find("[[buffer(4)]]") != std::string::npos)
+        return false;
+    const size_t body = s->find(") {\n", p);
+    if (body == std::string::npos)
+        return false;
+    size_t at = body;
+    for (;;) {
+        const size_t q = s->find(".sample(sm", at);
+        if (q == std::string::npos)
+            break;
+        size_t i = q + 8, depth = 1;   // after "sample("
+        for (; i < s->size() && depth; ++i)
+            depth += (*s)[i] == '(' ? 1 : (*s)[i] == ')' ? -1 : 0;
+        if (depth)
+            return false;
+        const size_t close = i - 1;
+        const std::string args = s->substr(q + 8, close - (q + 8));
+        if (args.find("level(") == std::string::npos && args.find("bias(") == std::string::npos &&
+            args.find("gradient") == std::string::npos) {
+            s->insert(close, ", bias(d9_tmp.x)");
+            at = close + 16;
+        } else {
+            at = close;
+        }
+    }
+    s->insert(p + strlen(kP), ",\n                         constant float4 &d9_tmp [[buffer(4)]]");
+    return true;
+}
+// v4.1 reactive mask: colour 1's blue = how much this blended draw covers the pixel (the pipeline max-blends blue only).
+static bool reactive_ps_patch(std::string *s, uint8_t mode) {
+    static const char kC0[] = "    float4 c0 [[color(0)]];\n";
+    static const char kRet[] = "    return o;\n}\n";
+    const size_t c0 = s->find(kC0), r = s->rfind(kRet);
+    if (mode < 1 || mode > 2 || c0 == std::string::npos || r == std::string::npos || r < c0 ||
+        s->find("[[color(1)]]") != std::string::npos)
+        return false;
+    s->insert(r, std::string("    {   // v4.1 MetalFX temporal: this blended draw's share of the pixel (reactive mask)\n"
+                             "        const float3 rc = max(o.c0.rgb, float3(0.0));\n"
+                             "        const float rv = max(rc.r, max(rc.g, rc.b))") +
+                     (mode == 1 ? " * saturate(o.c0.a)" : "") +
+                     ";\n"
+                     "        o.mv = float4(0.0, 0.0, min(0.9, rv), 0.0);\n"
+                     "    }\n");
+    s->insert(c0 + strlen(kC0), "    float4 mv [[color(1)]];\n");
+    return true;
+}
 static bool motion_ps_patch(std::string *s) {
     static const char kC0[] = "    float4 c0 [[color(0)]];\n";
     static const char kRet[] = "    return o;\n}\n";
@@ -1082,6 +1134,8 @@ static bool motion_ps_patch(std::string *s) {
                  "                   : float4(60000.0, 0.0, 0.0, 0.0);\n"
                  "    }\n");
     s->insert(c0 + strlen(kC0), "    float4 mv [[color(1)]];\n");
+    if (!motion_lod_bias(s))
+        return false;
     return motion_varyings(s);
 }
 // t7 = Mclip x opos (the D3D clip position before the half-pixel fixup); Mclip rows at buffer(18).
@@ -3177,6 +3231,11 @@ bool pixel_source(const Program &p, const PixelVariant &v, std::string *out, std
     if (v.hdr && !hdr_epilogue(&s, v.hdr)) {   // item 10: never "drawn to the float frame unclamped"
         if (why)
             *why = "hdr: the output lines are not as expected";
+        return false;
+    }
+    if (v.reactive && (v.motion || !reactive_ps_patch(&s, v.reactive))) {   // v4.1: drawn without the mask
+        if (why)
+            *why = "reactive: more than colour 0 or the output lines are not as expected";
         return false;
     }
     if (v.motion && !motion_ps_patch(&s)) {   // v2.5 MetalFX temporal: drawn plain (camera motion)

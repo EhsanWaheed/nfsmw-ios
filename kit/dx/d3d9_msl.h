@@ -67,6 +67,10 @@ namespace d9msl {
 // the lookup compares the coordinate's z with the stored depth (LESSEQUAL,
 // filtered) and returns the result in r, g and b.
 struct PixelVariant {
+    // v4.1 MetalFX temporal reactive mask (MSL only): a blended draw without depth writes in a motion pass writes how
+    // much it covers the pixel to colour 1's blue (max-blended by the pipeline): 1 = max(rgb) x alpha, 2 = max(rgb)
+    // (additive), at most 0.9. The motion kernel turns it into the scaler's reactive mask. Unchanged source when 0.
+    uint8_t reactive = 0;
     uint16_t cube_mask = 0;      // stages whose bound texture is a cube map
     uint16_t projected_mask = 0; // stages with D3DTTFF_PROJECTED
     uint16_t depth_mask = 0;     // stages whose bound texture holds depth
@@ -175,7 +179,8 @@ struct PixelVariant {
                ((uint64_t)pool * 0x85ebca77c2b2ae63ull) ^ ((uint64_t)pbrprobe * 0x94d049bb133111ebull) ^
                ((uint64_t)pbrworld * 0xd6e8feb86659fd93ull) ^ ((uint64_t)roadsheen * 0xa0761d6478bd642full) ^ ((uint64_t)glass * 0xe7037ed1a0b428dbull) ^
                ((uint64_t)water * 0x1d8e4e27c47d124full) ^ ((uint64_t)fefloor * 0x510e527fade682d1ull) ^
-               ((uint64_t)grass * 0x5be0cd19137e2179ull) ^ ((uint64_t)grass_blade * 0x6c62272e07bb0142ull);
+               ((uint64_t)grass * 0x5be0cd19137e2179ull) ^ ((uint64_t)grass_blade * 0x6c62272e07bb0142ull) ^
+               ((uint64_t)reactive * 0x2127599bf4325c37ull);
     }
 };
 // Remaster run 10: also write the pool varyings (object-space position, normal, uv, tangent: the raw POSITION0,

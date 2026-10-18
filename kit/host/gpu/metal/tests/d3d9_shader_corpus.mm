@@ -52,6 +52,12 @@ int main(int argc, char **argv) {
         // v4: D9_CORPUS_POOL=1|2 compiles every pixel shader as the fused pool variant (1 normal-mapped, 2 diffuse).
         if (const char *e = getenv("D9_CORPUS_POOL"); e && (*e == '1' || *e == '2'))
             pv.pool = (uint8_t)(*e - '0');
+        // v4.1: D9_CORPUS_MOTION=1 compiles the MetalFX temporal motion variant (motion output + mip bias).
+        if (const char *e = getenv("D9_CORPUS_MOTION"); e && *e == '1')
+            pv.motion = 1;
+        // v4.1: D9_CORPUS_REACTIVE=1|2 compiles the reactive-mask variant (alpha-weighted, additive).
+        if (const char *e = getenv("D9_CORPUS_REACTIVE"); e && (*e == '1' || *e == '2'))
+            pv.reactive = (uint8_t)(*e - '0');
         for (const fs::path &path : files) {
             @autoreleasepool {
                 std::ifstream file(path, std::ios::binary);

@@ -350,7 +350,7 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         m->_presented = [device newSharedEvent];
         // Each table only as big as its stage's slots (a draw snapshots its tables: a smaller table is a cheaper draw):
         // vertex buffers 0-8 streams, 10 grass, 16-21 constants / params / motion; fragment textures and samplers 0-15
-        // the D3D9 stages, 16-18 ours; fragment buffers 0-5; compute 2 buffers, 6 textures.
+        // the D3D9 stages, 16-18 ours; fragment buffers 0-5; compute 2 buffers, 7 textures.
         auto table = [&](NSUInteger buffers, NSUInteger textures, NSUInteger samplers) {
             MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new];
             ad.maxBufferBindCount = buffers;
@@ -361,7 +361,7 @@ static const MTLStages kD9AllStages = MTLStageVertex | MTLStageFragment | MTLSta
         };
         m->_vtab = table(22, 1, 1);
         m->_ftab = table(6, 19, 16);
-        m->_ctab = table(2, 6, 0);
+        m->_ctab = table(2, 7, 0);   // v4.1: texture 6 = the reactive mask
         m->chunks_ = [NSMutableArray array];
         m->allocators_ = [NSMutableArray array];
         MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];

@@ -391,6 +391,17 @@ fragment float4 depth_copy_fs(QuadOut i [[stage_in]], depth2d<float> t [[texture
     uint2 p = min(uint2(i.uv * float2(size)), size - uint2(1));
     return float4(t.read(p));
 }
+// v4.1 MetalFX temporal: the depth as it would be without the jitter (the effects' copy: ambient occlusion, motion blur,
+// depth of field). The scene moved by +j render pixels (x right, y down), so this pixel's unjittered depth is the
+// jittered depth at +j, read bilinearly (a nearest read flipped edge texels from frame to frame: AO flicker).
+fragment float4 depth_copy_jit_fs(QuadOut i [[stage_in]], depth2d<float> t [[texture(0)]], constant float4 &j [[buffer(0)]]) {
+    const float2 size = float2(t.get_width(), t.get_height());
+    const float2 q = clamp(i.uv * size + j.xy - 0.5, float2(0.0), size - 1.0);
+    const uint2 a = uint2(q), b = min(a + 1, uint2(size) - 1);
+    const float2 f = q - float2(a);
+    const float d00 = t.read(a), d10 = t.read(uint2(b.x, a.y)), d01 = t.read(uint2(a.x, b.y)), d11 = t.read(b);
+    return float4(mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y));
+}
 fragment float4 depth_copy_ms_fs(QuadOut i [[stage_in]], depth2d_ms<float> t [[texture(0)]]) {
     uint2 size = uint2(t.get_width(), t.get_height());
     uint2 p = min(uint2(i.uv * float2(size)), size - uint2(1));
@@ -412,6 +423,19 @@ fragment UpscaleOut upscale_compose_fs(QuadOut i [[stage_in]], texture2d<float> 
     UpscaleOut o;
     o.color = t.sample(s, i.uv);
     o.depth = z.read(p);
+    // v4.1: with the jitter (zoff not 0) a nearest read flips between neighbours as the fraction moves, so a slope's
+    // depth steps shift every frame (the AO after the scene flickered on floors and bodies). On a smooth surface the
+    // depth is read bilinearly; across an edge (the four differ) the nearest stays, so silhouettes keep their depth.
+    if (zoff.x != 0.0 || zoff.y != 0.0) {
+        const float2 q = clamp(i.uv * float2(size) + zoff - 0.5, float2(0.0), float2(size - uint2(1)));
+        const uint2 a = uint2(q), b = min(a + 1, size - uint2(1));
+        const float2 f = q - float2(a);
+        const float d00 = z.read(a), d10 = z.read(uint2(b.x, a.y)), d01 = z.read(uint2(a.x, b.y)), d11 = z.read(b);
+        // a plane (any slope, any distance) has d00 + d11 == d10 + d01; an edge between two surfaces does not
+        const float lo = min(min(d00, d10), min(d01, d11)), hi = max(max(d00, d10), max(d01, d11));
+        if (abs((d00 + d11) - (d10 + d01)) <= 0.25 * (hi - lo) + 1.0e-7 && hi < 1.0)
+            o.depth = mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
+    }
     return o;
 }
 fragment UpscaleOut upscale_compose_ms_fs(QuadOut i [[stage_in]], texture2d<float> t [[texture(0)]],
@@ -557,15 +581,17 @@ kernel void fnd_motion_cs(depth2d<float, access::read> z [[texture(0)]], texture
                           texture2d<float, access::read> pz [[texture(2)]], texture2d<float, access::write> nz [[texture(3)]],
                           texture2d<float, access::write> dbg [[texture(4)]], constant FndMv &u [[buffer(0)]],
                           device atomic_uint *q [[buffer(1)]], texture2d<float, access::read> om [[texture(5)]],
-                          uint2 p [[thread_position_in_grid]]) {
+                          texture2d<float, access::write> rm [[texture(6)]], uint2 p [[thread_position_in_grid]]) {
     const bool in = p.x < uint(u.size.x) && p.y < uint(u.size.y);
     fnd_body(p, in, in ? z.read(p) : 1.0, u, mv, pz, nz, dbg, q, om);
+    if (in && (u.flags & 64u))   // v4.1: the reactive mask, the blended draws' cover (motion target blue)
+        rm.write(float4((u.flags & 32u) ? saturate(om.read(p).z) : 0.0), p);
 }
 kernel void fnd_motion_ms_cs(depth2d_ms<float, access::read> z [[texture(0)]], texture2d<float, access::write> mv [[texture(1)]],
                              texture2d<float, access::read> pz [[texture(2)]], texture2d<float, access::write> nz [[texture(3)]],
                              texture2d<float, access::write> dbg [[texture(4)]], constant FndMv &u [[buffer(0)]],
                              device atomic_uint *q [[buffer(1)]], texture2d<float, access::read> om [[texture(5)]],
-                             uint2 p [[thread_position_in_grid]]) {
+                             texture2d<float, access::write> rm [[texture(6)]], uint2 p [[thread_position_in_grid]]) {
     const bool in = p.x < uint(u.size.x) && p.y < uint(u.size.y);
     float d = 1.0;
     if (in) {   // the nearest sample, as the scene compose takes it (flag 16: sample 0 only, the cheaper read)
@@ -574,6 +600,8 @@ kernel void fnd_motion_ms_cs(depth2d_ms<float, access::read> z [[texture(0)]], t
             d = min(d, z.read(p, k));
     }
     fnd_body(p, in, d, u, mv, pz, nz, dbg, q, om);
+    if (in && (u.flags & 64u))   // v4.1: the reactive mask
+        rm.write(float4((u.flags & 32u) ? saturate(om.read(p).z) : 0.0), p);
 }
 // v2.5 MetalFX temporal: the scene depth copied into a plain Depth32Float when the scaler will not take the scene's own.
 vertex float4 tmp_z_vs(uint vid [[vertex_id]]) {
@@ -3055,8 +3083,13 @@ class Renderer final : public D9Backend {
         // The car body and its windows draw blended (paint, glass) but write depth: they are surfaces, so they write
         // their own motion too (unblended, pipeline()); a blend without depth writes (smoke, glow) leaves it.
         const bool want_motion = pass_motion_ && rs[7] && (!blend || rs[14]);
+        // v4.1 reactive mask: a depth-tested blend without depth writes (smoke, sparks, glow, tail-light sprites) marks
+        // its share of the pixel in colour 1's blue (max-blended); a surface writes blue 0 with its motion (RGB).
+        const bool want_reactive = pass_motion_ && rs[7] && blend && !rs[14] && tmp_reactive_on_;
         if (pass_motion_)
-            cw[1] = want_motion ? 3u : 0u;
+            cw[1] = want_motion ? (tmp_reactive_on_ ? 7u : 3u) : want_reactive ? 4u : 0u;
+        if (want_reactive)
+            variant.reactive = (rs[19] == 5 || rs[19] == 12) ? 1 : 2;   // SRCALPHA / BOTHSRCALPHA: alpha-weighted
         uint64_t bkey =
             blend ? (1ull | (uint64_t)rs[19] << 1 | (uint64_t)rs[20] << 5 | (uint64_t)rs[171] << 9 |
                      (uint64_t)(rs[206] != 0) << 13 | (uint64_t)rs[207] << 14 |
@@ -3326,6 +3359,14 @@ class Renderer final : public D9Backend {
                 cw[1] = 0;
                 pso = build(variant, vvariant, &vfn, &ffn);
             }
+            if ((!vfn || !ffn || !pso) && variant.reactive) {   // v4.1 reactive mask: drawn without it
+                ++tmp_.reactive_fallback;
+                variant.reactive = 0;
+                cw[1] = 0;
+                pso = build(variant, vvariant, &vfn, &ffn);
+            }
+            if (pso && variant.reactive)
+                ++tmp_.reactive_draws;
             if ((!vfn || !ffn || !pso) && variant.pbrprobe) {   // run 12 probe (TEST ONLY): never lose the draw
                 ++pbr_fallback_;
                 variant.pbrprobe = 0;
@@ -4402,6 +4443,11 @@ class Renderer final : public D9Backend {
         if (!d || !(d.usage & MTLTextureUsageShaderRead))
             return;
         const bool ms = d.textureType == MTLTextureType2DMultisample;
+        // v4.1: in a jittered temporal frame the copy undoes the jitter (RECOMP_TEMPORAL_DEPTH_UNJITTER=0, TEST: off)
+        static const bool unjit_on = [] { const char *e = getenv("RECOMP_TEMPORAL_DEPTH_UNJITTER"); return !(e && *e == '0'); }();
+        const bool unjit = unjit_on && !ms && tmp_.frame && fnd_jitter_ && (fnd_.jx != 0.0 || fnd_.jy != 0.0);
+        if (!unjit)   // v4.1 diagnostics: why a copy kept the jitter
+            ++tmp_.unjit_skip[ms ? 0 : !tmp_.frame ? 1 : !fnd_jitter_ ? 2 : 3];
         end_pass();
         uint32_t tw = std::max<uint32_t>((uint32_t)t.width >> dst.level, 1);
         uint32_t th = std::max<uint32_t>((uint32_t)t.height >> dst.level, 1);
@@ -4413,8 +4459,9 @@ class Renderer final : public D9Backend {
         MTLPixelFormat cf[4] = {t.pixelFormat, MTLPixelFormatInvalid, MTLPixelFormatInvalid,
                                 MTLPixelFormatInvalid};
         id<MTLRenderPipelineState> pso =
-            utility_pipeline(mix(ms ? 0xd3c1ull : 0xd3c0ull, t.pixelFormat),
-                             ms ? @"depth_copy_ms_fs" : @"depth_copy_fs", cf, MTLPixelFormatInvalid, true);
+            utility_pipeline(mix(ms ? 0xd3c1ull : unjit ? 0xd3c2ull : 0xd3c0ull, t.pixelFormat),
+                             ms ? @"depth_copy_ms_fs" : unjit ? @"depth_copy_jit_fs" : @"depth_copy_fs", cf,
+                             MTLPixelFormatInvalid, true);
         if (!pso) {
             end_pass();
             return;
@@ -4436,6 +4483,13 @@ class Renderer final : public D9Backend {
         [enc_ setVertexBytes:&q length:sizeof q atIndex:0];
         st->used = serial_;
         [enc_ setFragmentTexture:d atIndex:0];
+        if (unjit) {   // the jitter in this depth's pixels (the scene's jitter is in scene render pixels)
+            const Tex *bt = tex_ptr(fnd_.bb);
+            const double k = bt && bt->texture && bt->texture.width ? (double)d.width / bt->texture.width : 1.0;
+            const float jv[4] = {(float)(fnd_.jx * k), (float)(fnd_.jy * k), 0.0f, 0.0f};
+            [enc_ setFragmentBytes:jv length:sizeof jv atIndex:0];
+            ++tmp_.unjittered;
+        }
         [enc_ drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         if (trace_)
             textures_[dst.id].written = serial_;
@@ -4820,7 +4874,9 @@ class Renderer final : public D9Backend {
         end_pass();
         if (on) {
             const NSUInteger w = t.texture.width, h = t.texture.height;
-            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:tmp_reactive_on_
+                                                                                              ? MTLPixelFormatRGBA16Float
+                                                                                              : MTLPixelFormatRG16Float
                                                                                           width:w
                                                                                          height:h
                                                                                       mipmapped:NO];
@@ -5670,11 +5726,17 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         if (tmp_on_ && (up_.frames + 1) % 600 == 0)
             fprintf(stderr,
                     "[remaster] temporal: scenes %llu scaled %llu spatial %llu resets %llu | motion draws %llu: previous "
-                    "constants %llu, new %llu, drawn plain %llu, flat %llu | jitter sign %+.0f\n",
+                    "constants %llu, new %llu, drawn plain %llu, flat %llu | jitter sign %+.0f | mip bias %.2f | reactive "
+                    "mask %s, draws %llu (failed %llu) | effect depth unjittered %llu (kept: msaa %llu, no frame %llu, "
+                    "no jitter %llu, zero %llu)\n",
                     (unsigned long long)tmp_.scenes, (unsigned long long)tmp_.scaled, (unsigned long long)tmp_.spatial,
                     (unsigned long long)tmp_.resets, (unsigned long long)tmp_.draws, (unsigned long long)tmp_.known,
                     (unsigned long long)tmp_.fresh, (unsigned long long)tmp_.plain, (unsigned long long)tmp_.flat,
-                    g_temporal_flip.load(std::memory_order_relaxed) ? -tmp_jsign_ : tmp_jsign_);
+                    g_temporal_flip.load(std::memory_order_relaxed) ? -tmp_jsign_ : tmp_jsign_, tmp_.lod_bias,
+                    tmp_.reactive ? "on" : "off", (unsigned long long)tmp_.reactive_draws,
+                    (unsigned long long)tmp_.reactive_fallback, (unsigned long long)tmp_.unjittered,
+                    (unsigned long long)tmp_.unjit_skip[0], (unsigned long long)tmp_.unjit_skip[1],
+                    (unsigned long long)tmp_.unjit_skip[2], (unsigned long long)tmp_.unjit_skip[3]);
         up_.pre_frame = 0;
         up_.begun_frame = false;
         up_.clr_color = up_.clr_depth = up_.clr_stencil = false;
@@ -5759,7 +5821,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         tmp_.last_present = presents_;
         const NSUInteger w = bt.texture.width, h = bt.texture.height;
         if (!tmp_.om || tmp_.om.width != w || tmp_.om.height != h) {
-            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
+            // v4.1: RGBA16F: motion in RG, the reactive cover in B (blended draws, max)
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
                                                                                           width:w
                                                                                          height:h
                                                                                       mipmapped:NO];
@@ -5771,6 +5834,17 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             tmp_.prev.clear();
         }
         tmp_.frame = tmp_.om != nil;
+        // v4.1 sharper textures: the jittered scene samples its textures at the output's detail (MetalFX's
+        // guidance: mip bias log2(render / display)), e.g. 600 -> 720 rows: -0.26, 540: -0.42. RECOMP_TEMPORAL_LODBIAS
+        // (TEST ONLY): a fixed bias, 0 = off.
+        {
+            static const char *fixed = getenv("RECOMP_TEMPORAL_LODBIAS");
+            const NSUInteger oh = bt.alt_texture ? bt.alt_texture.height : h;
+            float b = oh > h && h ? (float)std::log2((double)h / (double)oh) : 0.0f;
+            if (fixed && *fixed)
+                b = (float)atof(fixed);
+            tmp_.lod_bias = std::max(-1.0f, std::min(0.0f, b));
+        }
         tmp_.cleared = tmp_.wrote = tmp_.motion_ok = false;
         tmp_.cur.clear();
         tmp_.occ.clear();
@@ -5802,6 +5876,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         }
         [enc_ setVertexBytes:prev length:floats * sizeof(float) atIndex:20];
         [enc_ setVertexBytes:known length:sizeof known atIndex:21];
+        const float lb[4] = {tmp_.lod_bias, 0.0f, 0.0f, 0.0f};   // v4.1: the motion pixel half's mip bias (buffer 4)
+        [enc_ setFragmentBytes:lb length:sizeof lb atIndex:4];
         if (floats)
             tmp_.cur[id].c.assign(constants_.data(), constants_.data() + floats);
     }
@@ -5891,6 +5967,11 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     td.motionTextureFormat = MTLPixelFormatRG16Float;
                     td.outputTextureFormat = scene.pixelFormat;
                     td.autoExposureEnabled = NO;
+                    if (tmp_reactive_on_ && [td respondsToSelector:@selector(setReactiveMaskTextureEnabled:)]) {
+                        td.reactiveMaskTextureEnabled = YES;   // v4.1: blended effects favour the current frame
+                        td.reactiveMaskTextureFormat = MTLPixelFormatR8Unorm;
+                        tmp_.reactive = true;
+                    }
                     if (m4_) {   // v4: an MTL4FXTemporalScaler (same properties)
                         if (@available(macOS 26.0, iOS 26.0, *))
                             if (m4_fx_)
@@ -5945,6 +6026,14 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             sc.colorTexture = scene;
             sc.depthTexture = zt;
             sc.motionTexture = mv;
+            if (tmp_.reactive) {   // v4.1: this frame's mask (all 0 when no blended draw wrote: normal history)
+                id<MTLTexture> rm = fnd_.react && fnd_.react.width == scene.width && fnd_.react.height == scene.height
+                                        ? fnd_.react : nil;
+                if (rm && (rm.usage & sc.reactiveTextureUsage) == sc.reactiveTextureUsage)
+                    sc.reactiveMaskTexture = rm;
+                else
+                    sc.reactiveMaskTexture = nil;
+            }
             sc.outputTexture = tmp_.out;
             sc.inputContentWidth = iw;
             sc.inputContentHeight = ih;
@@ -6139,6 +6228,11 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     (int)have_g, (int)pk.form_any);
         }
         uint32_t reset = camera_resets(fnd_.cam_prev, fnd_.cam);
+        {   // TEST ONLY (RECOMP_TEMPORAL_CUT_HELD=1): every frame of a held cut-scene flag resets (the v4.0 rule)
+            static const bool held = [] { const char *e = getenv("RECOMP_TEMPORAL_CUT_HELD"); return e && *e == '1'; }();
+            if (held && fnd_.cam.have && (fnd_.cam.flags & 1u))
+                reset |= remaster_fnd::RESET_CUT;
+        }
         if (!fnd_.had_window)
             reset |= RESET_GAP;
         if (fnd_.resized)
@@ -6328,6 +6422,21 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         const bool om = tmp_.frame && tmp_.wrote && tmp_.om && tmp_.om.width == w && tmp_.om.height == h;
         if (om)
             u.flags |= 32u;   // v2.5 MetalFX temporal: the draws' own motion where they wrote it
+        // v4.1: the reactive mask beside the vectors (blended draws' cover; 0 where none wrote)
+        if (tmp_.frame && tmp_reactive_on_) {
+            if (!fnd_.react || fnd_.react.width != w || fnd_.react.height != h) {
+                MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                                                              width:w
+                                                                                             height:h
+                                                                                          mipmapped:NO];
+                rd.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+                rd.storageMode = MTLStorageModePrivate;
+                fnd_.react = [mtl_ newTextureWithDescriptor:rd];
+                note_alloc(AS_TEXTURE, fnd_.react, w, h, 1, 0);
+            }
+            if (fnd_.react)
+                u.flags |= 64u;
+        }
         const int si = (int)(fnd_.frames & 7);
         FndSlot &sl = fnd_.slot[si];
         const bool count = measure && !sl.pending;   // a slot still in flight: this frame goes uncounted
@@ -6344,6 +6453,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         [ce setBytes:&u length:sizeof u atIndex:0];
         [ce setBuffer:fnd_.q offset:(NSUInteger)(count ? si : 8) * 32 * 4 atIndex:1];
         [ce setTexture:om ? tmp_.om : nil atIndex:5];
+        [ce setTexture:(u.flags & 64u) ? fnd_.react : fnd_.motion_tex atIndex:6];   // v4.1 (unwritten without flag 64)
         [ce dispatchThreadgroups:MTLSizeMake((w + 15) / 16, (h + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         [ce endEncoding];
         if (count) {
@@ -7248,7 +7358,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
             if (cw[i] & 8)
                 m |= MTLColorWriteMaskAlpha;
             a.writeMask = m;
-            if (blend && !(pass_motion_ && i == 1)) {   // v2.5: the motion target is never blended
+            if (pass_motion_ && i == 1 && cw[i] == 4) {   // v4.1 reactive mask: the strongest cover per pixel (blue)
+                a.blendingEnabled = YES;
+                a.sourceRGBBlendFactor = a.destinationRGBBlendFactor = MTLBlendFactorOne;
+                a.sourceAlphaBlendFactor = a.destinationAlphaBlendFactor = MTLBlendFactorOne;
+                a.rgbBlendOperation = a.alphaBlendOperation = MTLBlendOperationMax;
+            } else if (blend && !(pass_motion_ && i == 1)) {   // v2.5: the motion target is never blended
                 a.blendingEnabled = YES;
                 a.sourceRGBBlendFactor = blend_factor(rs[19], false);
                 a.destinationRGBBlendFactor = blend_factor(rs[20], false);
@@ -8107,6 +8222,11 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                    *j = getenv("RECOMP_REMASTER_FOUNDATION_JITTER"), *k = getenv("RECOMP_REMASTER_FOUNDATION_JITTER_PHASE");
         return t && *t == '1' && f && *f == '1' && j && *j == '1' && !(k && *k);
     }();
+    // v4.1 reactive mask for MetalFX temporal (RECOMP_TEMPORAL_REACTIVE=0, TEST ONLY: off).
+    const bool tmp_reactive_on_ = [] {
+        const char *e = getenv("RECOMP_TEMPORAL_REACTIVE");
+        return !(e && *e == '0');
+    }();
     // MetalFX's jitter is the sample offset: the geometry moved by (jx, jy) pixels samples at minus that. 1 flips it.
     // (owner test 16 Oct: the flipped sign, +1, was the steadier one; the scaler takes the shift as drawn)
     const float tmp_jsign_ = [] { const char *e = getenv("RECOMP_TEMPORAL_JITTER_SIGN"); return e && *e == '0' ? -1.0f : 1.0f; }();
@@ -8126,6 +8246,12 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         std::unordered_map<uint64_t, uint32_t> occ;        // identity -> draws so far this scene (repeats of one mesh)
         std::unordered_map<uint64_t, int32_t> clip;        // vs key -> clip register (-1: no 4-dp4 oPos)
         uint64_t last_present = 0;
+        uint64_t reactive_fallback = 0;   // v4.1: reactive-mask variants that failed (drawn without)
+        uint64_t reactive_draws = 0;      // v4.1: draws that marked the mask
+        bool reactive = false;            // v4.1: the scaler takes a reactive mask
+        uint64_t unjittered = 0;          // v4.1: effect depth copies made without the jitter
+        uint64_t unjit_skip[4] = {};      // kept the jitter: multisampled, not a temporal frame, no jitter, zero jitter
+        float lod_bias = 0.0f;   // v4.1: the scene textures' mip bias, log2(scene / output height), -1..0
         uint64_t scenes = 0, scaled = 0, spatial = 0, resets = 0, draws = 0, known = 0, fresh = 0, noform = 0, plain = 0;
         uint64_t flat = 0;              // draws in the scene without a depth test (2D passes): not jittered, no motion
         std::set<std::string> flat_labels;
@@ -8202,6 +8328,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         id<MTLLibrary> lib = nil;
         id<MTLComputePipelineState> cs[2] = {nil, nil};
         id<MTLTexture> motion_tex = nil, prevz[2] = {nil, nil}, dbg = nil;
+        id<MTLTexture> react = nil;   // v4.1: the reactive mask (R8, scene size), from the motion target's blue
         id<MTLBuffer> q = nil;   // 8 slots x 32 words, shared
         FndSlot slot[8];
     } fnd_;
