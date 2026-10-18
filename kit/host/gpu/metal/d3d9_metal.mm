@@ -1705,8 +1705,17 @@ class Renderer final : public D9Backend {
                 note_alloc(AS_BUFFER_SPARE, b.buffer, b.shadow.size(), id, 1, 0);
             }
             b.spares.push_back(retired);
-            if (b.spares.size() > 4)
+            // v4: as many spares as the buffer cycles through (a buffer the game rewrites n times a frame needs about
+            // 3n with frames in flight): with 4, such buffers dropped a spare and made a new one every upload, and on
+            // Metal 4 each new one joins the residency set (commits ~2.9 ms a frame late in the owner's race). Up to 24,
+            // and 16 MB of spares per buffer.
+            size_t spare_bytes = 0;
+            for (const SpareBuf &s : b.spares)
+                spare_bytes += s.buffer.length;
+            while (b.spares.size() > 1 && (b.spares.size() > 24 || spare_bytes > (16u << 20))) {
+                spare_bytes -= b.spares.front().buffer.length;
                 b.spares.erase(b.spares.begin());
+            }
             b.used = 0;
             trace_buffer_upload(id, b, total, offset, size, true);
             return;
@@ -7507,9 +7516,23 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     id<MTLBuffer> transient(uint32_t size) {
         uint32_t aligned = (size + 15) & ~15u;
         if (!transient_ || transient_used_ + aligned > transient_.length) {
-            NSUInteger len = std::max<NSUInteger>(4u << 20, aligned);
-            transient_ = [mtl_ newBufferWithLength:len options:MTLResourceStorageModeShared];
-            note_alloc(AS_TRANSIENT, transient_, len, 1, 1, 0);
+            // v4: full ones wait for their frame and come back (a new 4 MB each time was a new resident on Metal 4)
+            if (transient_ && transient_.length == (4u << 20) && transient_pool_.size() < 8)
+                transient_pool_.push_back({transient_, serial_});
+            transient_ = nil;
+            const uint64_t done = completed_.load();
+            if (aligned <= (4u << 20))
+                for (size_t i = 0; i < transient_pool_.size(); ++i)
+                    if (transient_pool_[i].retired <= done) {
+                        transient_ = transient_pool_[i].buffer;
+                        transient_pool_.erase(transient_pool_.begin() + (ptrdiff_t)i);
+                        break;
+                    }
+            if (!transient_) {
+                NSUInteger len = std::max<NSUInteger>(4u << 20, aligned);
+                transient_ = [mtl_ newBufferWithLength:len options:MTLResourceStorageModeShared];
+                note_alloc(AS_TRANSIENT, transient_, len, 1, 1, 0);
+            }
             transient_used_ = 0;
         }
         transient_used_ += aligned;
@@ -7706,6 +7729,17 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
                     bars / frames, getenv("RECOMP_METAL4_BARRIERS") && !strcmp(getenv("RECOMP_METAL4_BARRIERS"), "safe")
                                        ? "safe" : "precise",
                     reused / frames, sets / frames, skips / frames, (unsigned long long)held);
+        {   // v4: new GPU resources per frame by site (each one is a residency add on Metal 4)
+            double n[AS_COUNT];
+            for (int i = 0; i < AS_COUNT; ++i) {
+                n[i] = (alloc_[i].count - perf_alloc_prev_[i]) / frames;
+                perf_alloc_prev_[i] = alloc_[i].count;
+            }
+            fprintf(stderr, "[gpu] perf new resources per frame: buffers %.2f, spares %.2f, transient %.2f, textures %.2f, "
+                            "other %.2f\n",
+                    n[AS_BUFFER], n[AS_BUFFER_SPARE], n[AS_TRANSIENT], n[AS_TEXTURE],
+                    n[AS_MSAA] + n[AS_READBACK] + n[AS_KEPT] + n[AS_FITTED_DEPTH]);
+        }
         perf_last_cpu_ns_ = perf_enc_cpu_ns_;
         perf_last_draws_ = draws_;
         perf_last_t_ = now;
@@ -7818,6 +7852,8 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     id<MTLBuffer> zero_ = nil;
     id<MTLBuffer> transient_ = nil;
     NSUInteger transient_used_ = 0;
+    std::vector<SpareBuf> transient_pool_;      // v4: full transient buffers, reused once their frame is done
+    uint64_t perf_alloc_prev_[AS_COUNT] = {};   // alloc_[site].count at the last perf line
     id<MTLTexture> white_ = nil, white_cube_ = nil, white_depth_ = nil, white_volume_ = nil;
     std::vector<uint8_t> scratch_;
     std::vector<float> constants_;

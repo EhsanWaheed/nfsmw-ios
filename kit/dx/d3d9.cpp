@@ -2006,11 +2006,11 @@ static void reject_draw(ComObj *dev, const HostD9Draw &attempt, uint32_t reason)
 // no native second pass, as the guest's own loop drew them before fusion).
 enum {
     POOL_OK, POOL_BLENDED, POOL_INPUTS, POOL_SAMPLERS, POOL_TEXTURES, POOL_EFFECT, POOL_TARGETS, POOL_WRITEMASK,
-    POOL_STENCIL, POOL_DEPTH, POOL_DEPTHTEX, POOL_FORCED, POOL_NOTREADY, POOL_BLOCKED, POOL_REASONS
+    POOL_STENCIL, POOL_DEPTH, POOL_DEPTHTEX, POOL_FORCED, POOL_NOTREADY, POOL_BLOCKED, POOL_PS1, POOL_REASONS
 };
 static const char *const kPoolReason[POOL_REASONS] = {"ok", "blended", "inputs", "samplers", "textures", "effect",
                                                       "targets", "writemask", "stencil", "depth", "depthtex", "forced",
-                                                      "notready", "blocked"};
+                                                      "notready", "blocked", "ps1.x"};
 // Cumulative for the whole run (never reset): printed every 600 presents and at exit.
 static uint64_t g_pool_requests, g_pool_fused, g_pool_fallback[POOL_REASONS], g_pool_fallback_failed, g_pool_up,
     g_pool_probes;
@@ -2047,7 +2047,7 @@ static int pool_ineligible(const D9Pipeline &pl, const d9sh::Program &vs, const 
     if ((have & (mapped ? 15u : 7u)) != (mapped ? 15u : 7u))
         return POOL_INPUTS;
     if (ps.major < 2)
-        return POOL_SAMPLERS;
+        return POOL_PS1;   // v4: counted apart from "samplers" (stage 0/1 not 2D): a pixel shader 1.x
     for (uint32_t s = 0; s < (mapped ? 2u : 1u); ++s) {
         auto k = ps.samplers.find(s);
         if (k != ps.samplers.end() && k->second != d9sh::S_2D)

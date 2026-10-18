@@ -112,7 +112,8 @@ struct D9M4State {
         put(std::move(v));
         return find(k);
     }
-    // At each commit: every 8 command buffers what the GPU is past and the last 2 did not use leaves (released);
+    // At each commit: every 8 command buffers what the GPU is past and the last 8 did not use leaves (released; v4: 8,
+    // not 2, so the renderer's recycled buffers - spares, transient - stay resident between their turns);
     // the table grows at half full. (Holding for 256 kept every buffer the game replaces each frame alive for ~4 s:
     // 3 GB on the owner's phone.)
     // `lag`: how far a use's recorded value can trail the value its command buffer committed with (a one-off command
@@ -142,7 +143,7 @@ struct D9M4State {
             return;
         for (size_t i = 0; i < slots.size();) {
             Slot &x = slots[i];
-            if (x.key && x.last + 2 < now && x.last + lag <= completed) {
+            if (x.key && x.last + 8 < now && x.last + lag <= completed) {
                 [resident removeAllocation:(id<MTLAllocation>)x.obj];
                 ++res_removes;
                 resident_dirty = true;

@@ -1506,6 +1506,14 @@ static void test_foundation() {
         b.flags = 1;
         CHECK(camera_resets(a, b) == (RESET_PAUSE | RESET_CUT));
         CHECK(camera_resets(a, Camera{}) == RESET_NO_CAMERA);
+        // v4: a held cut flag resets once (as it comes on); a turn > 30 degrees in a frame is a cut
+        b.frame = 11;
+        a.flags = 1;
+        CHECK(camera_resets(a, b) == 0);
+        b.V = view(1234.5, -356.25, 41.0, 0.7 + 0.3);   // ~17 degrees
+        CHECK(camera_resets(a, b) == 0);
+        b.V = view(1234.5, -356.25, 41.0, 0.7 + 0.6);   // ~34 degrees
+        CHECK(camera_resets(a, b) == RESET_JUMP);
     }
 }
 

@@ -454,9 +454,19 @@ inline uint32_t camera_resets(const Camera &prev, const Camera &cur) {
     uint32_t r = 0;
     if (!cur.have)
         return RESET_NO_CAMERA;
-    if (cur.flags & 1u)
+    // v4: the cut-scene flag counts as it comes on, not for every frame it stays on: the game holds it through the
+    // front end and its cinematics (the owner's 10 min run: 6,505 frames reset, history never kept there). Cuts
+    // inside a held flag still reset: a move > 10 m (JUMP), a FOV change, or a turn > 30 degrees in one frame.
+    if ((cur.flags & 1u) && !(prev.have && (prev.flags & 1u)))
         r |= RESET_CUT;
     if (prev.have) {
+        // the angle between the two views' rotations: trace(Rp^T Rc) = 1 + 2 cos(angle)
+        double t = 0.0;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                t += prev.V.m[i][j] * cur.V.m[i][j];
+        if (!((t - 1.0) * 0.5 >= 0.8660254037844386))   // cos 30 degrees
+            r |= RESET_JUMP;
         double a[3], b[3];
         camera_position(prev.V, a);
         camera_position(cur.V, b);
