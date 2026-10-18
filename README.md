@@ -72,6 +72,15 @@ instead of twice, the auto-brightness measurement takes half the passes, and the
 longer copied whole on every update. Temporal is now **Temporal (enhanced)** (Spatial stays the default) and keeps
 its history through menus and cut-scenes.
 
+**v4.2:** **Temporal** is now the default upscaler (**Spatial (compatibility)** stays in Graphics), sharper: the
+game's textures get a mip bias for the upscale, and smoke, sparks and other blended effects mark themselves so they
+no longer smear. The lighting flicker with ambient occlusion on under Temporal (main menu and races) is fixed. A new
+Liquid Glass launcher with the Black Edition cover art, controller navigation and button hints that match the
+connected pad (PlayStation cross/circle on a DualSense or Backbone One PlayStation Edition, A/B on others); Quit
+now closes the app. Every front-end screen (main menu, garage, shops, car lots) runs at 30 fps so the phone cools
+down between races; the open world and races are not capped. The game is shown on screen directly again (no extra
+compositing pass), and the app reports its real version (4.2).
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.

@@ -174,6 +174,21 @@ vertex layout's contents). The efficiency work that came with it, for both rende
 - The perf lines (`[gpu] perf ...`, every 600 frames) give the render thread's encode time, GPU time, draws, passes,
   barriers, residency changes, new resources per frame and the buffers making them.
 
+### v4.2
+
+- **Temporal default** (`ios_overlay.mm` registerDefaults); mip bias `log2(scene/output)` (clamped to -1..0) on the
+  jittered scene's samples, and a reactive mask: blended draws without depth writes write a third motion channel,
+  max-blended, which the motion kernel turns into MetalFX's R8 reactive mask.
+- **AO flicker under Temporal**: the composed scene depth is read bilinearly where the four texels are planar,
+  nearest at edges (`upscale_compose_fs`), so the AO no longer sees the jitter.
+- **Front-end cap 30 fps** (was 40) in every screen that is not the world or a race.
+- **Launcher** (`kit/host/sdl/launcher_ios.mm`): native Liquid Glass view over the SDL window from the launcher
+  model's `View`; hints follow the controller family (`pad_family`, live on connect/disconnect). It leaves the view
+  hierarchy at once when the game starts: a lingering view over the Metal layer made the Metal HUD say *Composited*
+  instead of *Direct* (a full-screen compositor pass every frame). `[ui]` log lines at 8 s and 90 s list any view
+  still over the game.
+- Version from `RECOMP_APP_VERSION` (4.2), build number = commit count at configure time.
+
 ### Controller button icons
 
 The pad prompts once drew blank: `frontend_pad.h` swapped them to textures from XtendedInput's
@@ -201,8 +216,8 @@ the front end too, not only in the world, so the garage scene is upscaled. The P
 
 ### App identity
 
-Bundle id `com.E5N97.nfsmw` (`game.toml`). Icon: `build/ios-icon.png` when present (a crop of the owner's
-capture of the main menu's M3 GTR; kept out of git), through `kit/tools/extract_icon.py --image`, which also writes
+Bundle id `com.E5N97.nfsmw` (`game.toml`). Icon: `build/ios-icon.png` when present (the Black Edition cover
+art since v4.1; kept out of git, also copied into the bundle as `LauncherArt.png`), through `kit/tools/extract_icon.py --image`, which also writes
 @3x sizes now.
 
 ## Findings worth remembering
