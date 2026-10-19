@@ -405,6 +405,8 @@ void open_editor() {
     mods_page_close();
 }
 
+int g_unhide_layout = -1; // the layout row before host_toggle_hidden hid the controls
+
 void close_editor() {
     g_editor.close();
     g_editor_renamed = false;
@@ -695,6 +697,18 @@ void host_pump(uint64_t now) {
     mods_controls_flush();
 
     publish();
+}
+
+void host_toggle_hidden() {
+    const int hidden = int(g_store.names().size()); // the row's last choice is Hidden
+    const int now = mods_controls_value(CONTROLS_LAYOUT_ROW);
+    if (now != hidden) {
+        g_unhide_layout = now;
+        (void)mods_controls_set(CONTROLS_LAYOUT_ROW, hidden);
+    } else {
+        (void)mods_controls_set(CONTROLS_LAYOUT_ROW, g_unhide_layout >= 0 && g_unhide_layout < hidden ? g_unhide_layout : 0);
+    }
+    fprintf(stderr, "[controls] hold: on-screen controls %s\n", now != hidden ? "hidden" : "shown");
 }
 
 } // namespace controls

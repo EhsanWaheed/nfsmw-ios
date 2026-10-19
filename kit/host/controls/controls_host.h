@@ -44,6 +44,9 @@ bool host_finger_cancel(int64_t id);
 void host_pointer_moved(double x, double y);
 // Focus loss or backgrounding: every finger is gone, every key and modifier up.
 void host_release_all();
+// v4.4: hides the on-screen controls (the layout row's Hidden choice), or brings back the layout they had (the
+// first one when there is none to go back to). A one-finger hold of kTouchHideHoldNs toggles it (sdl/main.cpp).
+void host_toggle_hidden();
 
 // --- the layout editor (editor.h) -------------------------------------------
 // It opens on the settings page's EDIT row or an edit_layout action, both

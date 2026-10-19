@@ -918,6 +918,18 @@ TouchMapper g_touch;
 // v4.3: swipes through the game's menus (input_touch.h MenuSwipe). It takes a finger on the game image while
 // menu_swipe_wanted(); a finger it gives back (a tap, or the first of two) goes to g_touch as if it had just landed.
 MenuSwipe g_swipe;
+// v4.4: one finger held still on the game image (not on a control) for kTouchHideHoldNs hides the on-screen
+// controls, or brings them back (controls::host_toggle_hidden). A second finger or a move past kTouchTapTravel
+// ends the chance; once it fires, the finger is taken from the gesture mapper and the swipes, so its lift does
+// nothing else.
+constexpr uint64_t kTouchHideHoldNs = 4000ull * 1000000ull;
+struct HideHold {
+    bool armed = false, fired = false;
+    int64_t id = 0;
+    double x0 = 0, y0 = 0;
+    uint64_t t0 = 0;
+    int fingers = 0; // unclaimed fingers down
+} g_hold;
 bool menu_swipe_wanted() {
     const uint32_t phase = host_d9_game_phase();
     return (phase == 1 || phase == 3) && mods_controls_value(CONTROLS_MENU_SWIPE_ROW) != 0 &&
@@ -1019,6 +1031,7 @@ void touch_release_all() {
     std::vector<TouchAction> actions;
     g_touch.cancel_all(&actions);
     g_swipe.cancel_all(&actions);
+    g_hold = HideHold{};
     push_touch_actions(actions);
     controls::host_release_all();
 }
@@ -1374,6 +1387,15 @@ void handle_event(const SDL_Event &event) {
         if (controls::host_finger_cancel(finger))
             break;
         std::vector<TouchAction> actions;
+        if (finger == g_hold.id) {
+            g_hold.armed = false;
+            if (g_hold.fingers > 0)
+                --g_hold.fingers;
+            if (g_hold.fired) {
+                g_hold.fired = false;
+                break;
+            }
+        }
         if (g_swipe.owns(finger)) {
             g_swipe.finger_cancel(finger);
             break;
@@ -1395,6 +1417,10 @@ void handle_event(const SDL_Event &event) {
             if (controls::host_finger_down(finger, px, py, now))
                 break;
             const TouchPoint tp = touch_point(event.tfinger);
+            if (++g_hold.fingers == 1)
+                g_hold = {true, false, finger, tp.x, tp.y, now, 1};
+            else
+                g_hold.armed = false;
             if (menu_swipe_wanted()) {
                 g_swipe.set_reverse(mods_controls_value(CONTROLS_SWIPE_REVERSE_ROW) != 0);
                 g_swipe.set_left_edge(game_rect_points().x);
@@ -1411,6 +1437,14 @@ void handle_event(const SDL_Event &event) {
             if (controls::host_finger_up(finger, now))
                 break;
             const TouchPoint tp = touch_point(event.tfinger);
+            if (g_hold.fingers > 0)
+                --g_hold.fingers;
+            if (g_hold.fired && finger == g_hold.id) {
+                g_hold.fired = g_hold.armed = false;
+                break; // the hold fired: this lift is not a tap
+            }
+            if (finger == g_hold.id)
+                g_hold.armed = false;
             if (g_swipe.owns(finger)) {
                 // A finger that never swiped is a tap where it landed: the mapper's click.
                 TouchPoint tap{};
@@ -1424,6 +1458,13 @@ void handle_event(const SDL_Event &event) {
         } else {
             if (controls::host_finger_motion(finger, px, py, now))
                 break;
+            if (g_hold.fired && finger == g_hold.id)
+                break;
+            if (g_hold.armed && finger == g_hold.id) {
+                const TouchPoint mp = touch_point(event.tfinger);
+                if (hypot(mp.x - g_hold.x0, mp.y - g_hold.y0) > kTouchTapTravel)
+                    g_hold.armed = false;
+            }
             if (g_swipe.owns(finger))
                 g_swipe.finger_motion(touch_point(event.tfinger), now, &actions);
             else
@@ -1587,6 +1628,14 @@ void after_events() {
         g_touch.frames_presented(host_present_count());
         g_touch.tick(SDL_GetTicksNS(), &actions);
         g_swipe.tick(SDL_GetTicksNS(), &actions);
+        if (g_hold.armed && !g_hold.fired && g_hold.fingers == 1 && SDL_GetTicksNS() - g_hold.t0 >= kTouchHideHoldNs) {
+            g_hold.fired = true;
+            g_hold.armed = false;
+            g_touch.finger_cancel(g_hold.id, &actions);
+            g_swipe.finger_cancel(g_hold.id);
+            controls::host_toggle_hidden();
+            platform_ui_haptic_tap();
+        }
         push_touch_actions(actions);
         // The controls follow the hardware keyboard (attached: key layouts
         // hidden), a physical controller (connected: pad layouts hidden and

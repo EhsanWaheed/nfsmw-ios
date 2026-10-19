@@ -461,6 +461,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
 }
 
 - (void)thermalChanged:(NSNotification *)note {
+    // Every change, logged: at the resolution floor applyResolution has nothing to log (v4.4).
+    static const char *const names[4] = {"nominal", "fair", "serious", "critical"};
+    fprintf(stderr, "[ios] thermal state now %s\n",
+            names[std::clamp<NSInteger>(NSProcessInfo.processInfo.thermalState, 0, 3)]);
     dispatch_async(dispatch_get_main_queue(), ^{
       [self applyResolution];
       [self refreshStatus];
