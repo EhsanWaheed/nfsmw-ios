@@ -922,7 +922,7 @@ MenuSwipe g_swipe;
 // controls, or brings them back (controls::host_toggle_hidden). A second finger or a move past kTouchTapTravel
 // ends the chance; once it fires, the finger is taken from the gesture mapper and the swipes, so its lift does
 // nothing else.
-constexpr uint64_t kTouchHideHoldNs = 4000ull * 1000000ull;
+constexpr uint64_t kTouchHideHoldNs = 2500ull * 1000000ull; // owner: 4 s felt too long
 struct HideHold {
     bool armed = false, fired = false;
     int64_t id = 0;
