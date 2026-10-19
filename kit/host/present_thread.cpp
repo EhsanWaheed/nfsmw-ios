@@ -35,6 +35,9 @@ extern "C" void host_audio_restart_output(const char *why); // weak default: run
 #include <set>
 #include <thread>
 #include "../platform/os.h"
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 namespace {
 // Test78 (owner, 1 Oct 2026): the presenter paces at the game's frame rate when the display refreshes at a
@@ -1079,12 +1082,28 @@ struct Service : std::enable_shared_from_this<Service> {
             const gpu::TextureDesc drawable_desc =
                 drawable ? device->describe(drawable) : gpu::TextureDesc{};
             const gpu::Format out_format = offscreen ? gpu::Format::RGBA8 : drawable_desc.format;
-            bool reuse_composition = f->repeat && cached && cached->w == w && cached->h == h &&
+            // v4.3 (heat): compose straight into the drawable when nothing needs the composite afterwards: the
+            // frame fills it exactly, no capture waits on it, and no glass controls bend it (they read it as their
+            // backdrop). That drops one full-screen copy a frame (at 2868x1320, ~30 MB of memory traffic). The
+            // composite is then not kept: a repeat composes again from its retained inputs. iOS by default;
+            // RECOMP_PRESENT_DIRECT=1 / 0 turns it on or off anywhere.
+            static const bool direct_allowed = [] {
+                const char *e = recomp_env("PRESENT_DIRECT");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+                return !(e && strcmp(e, "0") == 0);
+#else
+                return e && strcmp(e, "1") == 0;
+#endif
+            }();
+            const controls::ControlsView controls_view = host_present_controls();
+            const bool direct = direct_allowed && drawable && !placed && w == drawable_desc.width &&
+                                h == drawable_desc.height && !f->capture && !controls_view.wanted;
+            bool reuse_composition = !direct && f->repeat && cached && cached->w == w && cached->h == h &&
                                      cached->format == out_format;
             std::shared_ptr<Composite> out =
-                reuse_composition ? cached : composite(w, h, out_format);
+                direct ? nullptr : reuse_composition ? cached : composite(w, h, out_format);
             gpu::CommandBuffer cb = device->begin();
-            if (!cb || !out) {
+            if (!cb || (!out && !direct)) {
                 if (drawable)
                     device->release_drawable(chain, drawable);
                 if (f) {
@@ -1105,12 +1124,14 @@ struct Service : std::enable_shared_from_this<Service> {
             static const bool hdr_pattern = [] { const char *e = recomp_env("TEST_HDR_PATTERN"); return e && std::atoi(e) != 0; }();
             f->input.hdr_pattern = hdr_pattern;   // R2 #10 TEST: the bars (compositor mode 5)
             if (!reuse_composition)
-                compositor_compose(device, &f->input, out->texture, cb);
+                compositor_compose(device, &f->input, direct ? drawable : out->texture, cb);
             f->composed = out;
             if (drawable) {
                 // v4.3: the finished frame, where it lands in the drawable, for the controls' glass to bend.
                 controls::Backdrop backdrop;
-                if (out->w == drawable_desc.width && out->h == drawable_desc.height &&
+                if (direct) {
+                    // already in the drawable
+                } else if (out->w == drawable_desc.width && out->h == drawable_desc.height &&
                     out->format == drawable_desc.format) {
                     device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, 0, 0);
                     backdrop = {out->texture, 0, 0, out->w, out->h};
@@ -1153,7 +1174,6 @@ struct Service : std::enable_shared_from_this<Service> {
                 performance_overlay.draw(device, cb, drawable, drawable_desc.width,
                                          drawable_desc.height, snapshot, ts, mods_display_overlay(),
                                          mods_display_fps(), f->diagnostic, f->frame_id);
-                const controls::ControlsView controls_view = host_present_controls();
                 if (controls_view.wanted)
                     controls_overlay.draw(device, cb, drawable, drawable_desc.width,
                                           drawable_desc.height, controls_view, backdrop);

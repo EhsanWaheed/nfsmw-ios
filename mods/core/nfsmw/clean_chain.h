@@ -48,9 +48,18 @@ typedef struct {
     int alt;                                 /* alt=TARGET: the destination while the G2 grade is on (else CC_SRC_NONE) */
     int grade, mirror;                       /* clean_grade pass (skipped while G2 is off); mirror=1: drawn on the mirror */
     int gmask;                               /* grade=off,pc,vt: G2 states it draws in (bit 0 off, 1 pc, 2 vt; clean_grade.h) */
+    int emod;                                /* module E pass (clean_motion_dof, clean_dof_*): skipped while E is inactive */
 } CcPass;
 
 static int g_cc_env = -1;                    /* 0 unset, 1 forced on (TEST) */
+/* v4.3 (heat): module E (motion blur + cinematic DoF, clean_motion_dof and its five quarter-size DoF passes) is
+ * skipped on frames where its coverage is exactly 0 everywhere, so its alpha blend would leave the frame as it is:
+ * motion blur off or the camera no faster than EMotionParams.x (the blur length is then exactly 0), and DoF off,
+ * without depth or without both focus values (PS_MotionDof's aDof is then exactly 0). Parked in the garage, at the
+ * start line, in most menus. NFSMW_E_ALWAYS=1 runs it every frame (as before). */
+static int g_cc_emotion_i = -1;
+static int g_cc_e_on = 1;
+static uint64_t g_cc_e_frames, g_cc_e_skipped;
 static int g_cc_state;                       /* 0 untried, 1 ready, -1 failed */
 /* PLAN_R2 item 10 real HDR (review/run14/hdr-design.md s2.4): the kit's frame is float (private render state 249,
  * read-only): the chain loads clean-chain-hdr.fx and makes its `f16` targets and the frame copy RGBA16F. 0 = the
@@ -277,6 +286,7 @@ static int cc_parse(const PopModApi *api, char *fxname, size_t fxn) {
             if (g_cc_ng >= CC_MAXG) { ok = cc_fail_load("too many constants", ln); break; }
             if (!(g_cc_gparam[g_cc_ng] = cc_param(tok[1]))) { ok = cc_fail_load("constant not in the effect", ln); break; }
             if (!cc_floats(tok[2], g_cc_gval[g_cc_ng])) { ok = cc_fail_load("constant value", ln); break; }
+            if (!strcmp(tok[1], "EMotionParams")) g_cc_emotion_i = (int)g_cc_ng;   /* x: the motion blur's start speed */
             ++g_cc_ng;
         } else if (!strcmp(tok[0], "pass") && nt >= 4 && !strcmp(tok[2], "->")) {
             if (g_cc_np >= CC_MAXP) { ok = cc_fail_load("too many passes", ln); break; }
@@ -288,6 +298,7 @@ static int cc_parse(const PopModApi *api, char *fxname, size_t fxn) {
             p->ao = !strncmp(tok[1], "clean_ao", 8);
             p->aoblur = !strncmp(tok[1], "clean_ao_blur", 13);
             p->grade = !strncmp(tok[1], "clean_grade", 11);
+            p->emod = !strcmp(tok[1], "clean_motion_dof") || !strncmp(tok[1], "clean_dof_", 10);
             p->alt = CC_SRC_NONE;
             const uint32_t a[] = {cc_name(tok[1])};
             p->htech = pfx_call(g_cc_fx, 0x34, a, 1);                     /* GetTechniqueByName */
@@ -588,6 +599,21 @@ static void cc_e_inputs(const PopModApi *api, uint32_t dev, unsigned out_w, unsi
         if (tc) fl[0] = 1.0f;
     }
     cc_set4(g_cc_p_nearfar, nf); cc_set4(g_cc_p_vel, vel); cc_set4(g_cc_p_flags, fl); cc_set4(g_cc_p_focus, fo); cc_set4(g_cc_p_motion, ms);
+    {
+        static int always = -1;
+        if (always < 0) { const char *e = getenv("NFSMW_E_ALWAYS"); always = e && *e == '1'; }
+        const float start = g_cc_emotion_i >= 0 ? g_cc_gval[g_cc_emotion_i][0] : 8.0f;
+        const int mb_on = ms[0] > 0.0f && vel[3] > start;
+        const int dof_on = ms[1] > 0.0f && have_depth && fabsf(fo[0]) > 0.000001f && fabsf(fo[1]) > 0.000001f;
+        g_cc_e_on = always || mb_on || dof_on;
+        if (g_cc_e_on) ++g_cc_e_frames; else ++g_cc_e_skipped;
+        if ((g_cc_e_frames + g_cc_e_skipped) % 3600 == 0) {   /* every minute or so: phone logs never see the exit line */
+            char line[160];
+            snprintf(line, sizeof line, "core.nfsmw: clean chain: module E drawn on %llu frames, skipped on %llu (inactive)",
+                     (unsigned long long)g_cc_e_frames, (unsigned long long)g_cc_e_skipped);
+            api->log(api, line);
+        }
+    }
     static int elog = -1;   /* TEST ONLY: NFSMW_TEST_CLEAN_E_LOG=1 logs the E inputs every 120 clean frames */
     if (elog < 0) elog = getenv("NFSMW_TEST_CLEAN_E_LOG") != NULL;
     if (elog && g_cc_frames % 120 == 0) {
@@ -771,7 +797,7 @@ static void clean_chain_run(const PopModApi *api, uint32_t dev, uint32_t bb, uns
             const float ha[4] = {measure_dt > 0.2f ? 0.2f : measure_dt, host[1], host[2], host[3]};
             cc_set4(g_cc_p_host, ha);
         }
-        if ((p->sun && !g_cc_sun_on) || (p->glow && !g_cc_glow_on)) continue;
+        if ((p->sun && !g_cc_sun_on) || (p->glow && !g_cc_glow_on) || (p->emod && !g_cc_e_on)) continue;
         if (p->ao && (!g_cc_ao_on || (p->aoblur && g_cc_ao_view == 2))) continue;   /* ssao off: before any device call */
         if (p->mirror || !(p->gmask >> (g_cc_grade_on ? g_cc_grade_route : 0) & 1)) continue;   /* mirror: below; G2 state: before any device call */
         if (p->recopy) {                                                  /* the AO'd frame into the copy (as above) */
@@ -844,6 +870,9 @@ static void clean_chain_exit(const PopModApi *api) {
                  (unsigned long long)g_cc_depth_frames, (unsigned long long)g_cc_depth_missing);
         api->log(api, line);
     }
+    snprintf(line, sizeof line, "core.nfsmw: clean chain: module E (motion blur, DoF) drawn on %llu frames, skipped on %llu (inactive)",
+             (unsigned long long)g_cc_e_frames, (unsigned long long)g_cc_e_skipped);
+    api->log(api, line);
     snprintf(line, sizeof line, "core.nfsmw: TEST clean chain: %llu frames, %llu history resets, %llu device resets, %llu target sets, %llu pass errors%s%s",
              (unsigned long long)g_cc_frames, (unsigned long long)g_cc_resets, (unsigned long long)g_cc_device_resets,
              (unsigned long long)g_cc_target_sets, (unsigned long long)g_cc_pass_errors, g_cc_state < 0 ? "; failed: " : "",
