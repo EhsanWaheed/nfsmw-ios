@@ -537,6 +537,10 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
 void win32_init(const std::string &game_dir) {
     kernel32_wide_reset();
     g_game_dir = game_dir.empty() ? std::string(".") : game_dir;
+    // v4.5: the game's folder, for mods that look for the player's own extra files beside the game (mods load after
+    // the loader has called this). The host's value, if it set one, wins.
+    if (!getenv("RECOMP_GAME_DIR"))
+        os_setenv("RECOMP_GAME_DIR", g_game_dir.c_str());
     g_cur_dir = RECOMP_GUEST_ROOT;
     g_last_error = 0;
     g_exited = false;

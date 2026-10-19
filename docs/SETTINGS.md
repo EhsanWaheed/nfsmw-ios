@@ -145,6 +145,7 @@ Open the settings menu with **F10** (Fn+F10 on a laptop), the controller's touch
 
 | Setting | Key | Default | Takes effect | What it does |
 |---|---|---|---|---|
+| Xbox 360 engine sounds | `x360_engine_sounds` | on | after a restart | The Xbox 360 version's engine sounds (87 cars' engines), from your own copy of the Xbox 360 Stuff Pack: put its SOUND/ENGINE folder in your game folder as X360Sound/SOUND/ENGINE. Without that folder the PC sounds play. Follows Look: Xbox 360 on, PC off. Applies at the next launch. |
 | Front-end car shadow off | `fe_shadows` | off | after a restart | In the garage and menus the car has no dark ground shadow under it, as on the Xbox 360. Restart to apply. |
 | Xbox 360 textures | `x360_textures` | on | after a restart | Uses the sharper Xbox 360 textures for roads, buildings and cars (needs the texture pack). Restart to apply. |
 | Xbox 360 sky | `x360_sky` | Xbox 360 | after a restart | Xbox 360: the console sky and clouds, our own version of the console sky shader. Original: the PC sky. Restart to apply. |

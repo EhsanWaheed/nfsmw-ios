@@ -604,6 +604,42 @@ static void hide_game_cursor(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvoc
     api->hook_return(api, cpu, cpu->eax, 0);   /* cdecl: the caller pops its two arguments */
 }
 
+
+/* v4.5 (owner): the Xbox 360 engine sounds. The player's own copy of the Stuff Pack's SOUND/ENGINE (.gin files that
+ * replace 87 of the PC's 160 by name) in <game>/X360Sound/SOUND/ENGINE is pushed as a file overlay at launch, so the
+ * game reads those instead of its own; nothing of it ships with the app. Look rule as stuffpack_smoke (Xbox 360 on,
+ * PC off, Definitive: the setting). */
+static void x360_engine_init(const PopModApi *api) {
+    int64_t look = 0, v = 1;
+    api->settings_get(api, "look", &look);
+    api->settings_get(api, "x360_engine_sounds", &v);
+    if (!(look == 1 ? 1 : look == 2 ? 0 : v != 0)) {
+        api->log(api, "core.nfsmw: Xbox 360 engine sounds off (PC sounds)");
+        return;
+    }
+    const char *game = getenv("RECOMP_GAME_DIR");
+    char dir[2048], probe[2200];
+    snprintf(dir, sizeof dir, "%s/X360Sound", game && *game ? game : ".");
+    snprintf(probe, sizeof probe, "%s/SOUND/ENGINE", dir);
+    FILE *f = NULL;
+    {   /* the folder must hold at least one engine file */
+        char one[2300];
+        snprintf(one, sizeof one, "%s/GIN_BMW_M3_race.gin", probe);
+        f = fopen(one, "rb");
+        if (f) fclose(f);
+    }
+    uint32_t layer = 0;
+    if (!f) {
+        api->log(api, "core.nfsmw: Xbox 360 engine sounds: no X360Sound/SOUND/ENGINE in the game folder; PC sounds");
+        return;
+    }
+    if (api->overlay_push(api, dir, &layer) != POP_OK) {
+        api->log(api, "core.nfsmw: Xbox 360 engine sounds: overlay refused; PC sounds");
+        return;
+    }
+    api->log(api, "core.nfsmw: Xbox 360 engine sounds on (X360Sound overlay)");
+}
+
 PopModStatus pop_mod_init(const PopModApi *api) {
     PopModStatus s;
     g_api = api;
@@ -757,6 +793,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
     if (getenv("NFSMW_TEST_MIRROR_LIGHT_LOG"))   /* TEST ONLY */
         install(0x00505380u, mirror_flare_count, POP_HOOK_BEFORE, 81);
     frontend_pad_init(api);
+    x360_engine_init(api);
     /* RECOMP_HIDE_GAME_CURSOR=1 (the iOS host): the game's own menu arrow (PC_CURSOR, drawn at the mouse position by
      * 0056fdb0, cdecl, its only draw) is not drawn, so an iPad shows only its own pointer, not two. */
     if (getenv("RECOMP_HIDE_GAME_CURSOR") && *getenv("RECOMP_HIDE_GAME_CURSOR") == '1' &&
