@@ -833,7 +833,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     const NSInteger t = std::clamp<NSInteger>(NSProcessInfo.processInfo.thermalState, 0, 3);
     const int ta = host_upscale_temporal_active();
     NSString *kind = ta == 1 ? @"MetalFX temporal" : ta == 0 ? @"MetalFX spatial: temporal fell back" : @"MetalFX";
+    // v4.4: the PC look never upscales (mods/core/nfsmw upscale.h): a user on an M1 iPad read no MetalFX as broken.
+    int64_t look = 0;
+    mod_setting("look", nullptr, &look);
     NSString *scene = iw ? [NSString stringWithFormat:@"3D scene %d×%d → %d×%d (%@)", iw, ih, ow, oh, kind]
+                         : look == 2 ? @"3D scene at native resolution: the PC look does not use MetalFX (Definitive or Xbox 360 do)"
                          : _appliedRows == 0 ? @"3D scene at native resolution (MetalFX off)"
                                              : @"3D scene: not upscaled yet (starts with the next 3D frame)";
     NSString *stepped = _appliedRows != [self userRows]
