@@ -3,7 +3,7 @@
 function(pop_ios_bundle target)
   # The version LiveContainer / Settings show (v4: was a fixed 0.1) and the build number (commits in the checkout).
   if(NOT RECOMP_APP_VERSION)
-    set(RECOMP_APP_VERSION "4.2")
+    set(RECOMP_APP_VERSION "4.3")
   endif()
   execute_process(COMMAND git rev-list --count HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                   OUTPUT_VARIABLE RECOMP_APP_BUILD OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)

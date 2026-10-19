@@ -81,6 +81,14 @@ now closes the app. Every front-end screen (main menu, garage, shops, car lots) 
 down between races; the open world and races are not capped. The game is shown on screen directly again (no extra
 compositing pass), and the app reports its real version (4.2).
 
+**v4.3:** new **Liquid Glass touch controls**: every button is a piece of glass over the live game (drawn in the
+game's own last pass, so the screen still shows directly), with labels in the system font and the PlayStation
+logo on PS. A new phone controller layout: a floating steering stick anywhere in the lower left, ✕ ○ □ △ in their
+PlayStation colours, much bigger L2 (brake) and R2 (gas) along the top. The D-pad is off by default (Controls →
+D-pad brings it back). **Swipe through the menus** (main menu, garage, shops, pause screen): the menu follows your
+finger like the PS3's, tap to choose, swipe in from the left edge to go back (Controls → Menu swipes / Reverse
+swipes). The launcher no longer starts the game by itself.
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.

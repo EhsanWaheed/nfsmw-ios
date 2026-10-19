@@ -189,6 +189,21 @@ vertex layout's contents). The efficiency work that came with it, for both rende
   still over the game.
 - Version from `RECOMP_APP_VERSION` (4.2), build number = commit count at configure time.
 
+### v4.3 (touch)
+
+- **Glass controls** (`kit/host/controls/overlay.cpp` draw_glass, `pad_art.cpp` glass_shape / paint_control_glass,
+  `shaders_msl.h` "glass"): one quad per control in the presenter's pass after the composite; the fragment bends
+  the finished frame (`controls::Backdrop`, the composite texture and its offset) at the rim, 7-tap frost (1 for a
+  resting stick hint), tint, lit rim, shadow. The CPU layers only hold glyphs and labels; labels come from a
+  CoreText hook on iOS (`raster.h` set_text_hook, `platform_ui_ios.mm`; "sf:<name>" is an SF Symbol), cached.
+  Other backends keep the old look (no "glass" pipeline).
+- **Phone pad layout** (`builtin_layouts.cpp` kPadPhoneLandscape) redesigned; **D-pad** row
+  (CONTROLS_DPAD_ROW, off): `controls_host.cpp` drops Dpad controls on load, the editor gets the file's layout.
+- **Menu swipes** (`input_touch.h` MenuSwipe, `sdl/main.cpp`): in phases 1 and 3 one finger on the game image
+  swipes arrows (step 36 pt, then every 72 pt; flick once), content follows the finger unless Reverse swipes,
+  left-edge swipe right is Escape, a finger that never moved is replayed to the TouchMapper as a tap.
+- Launcher auto-start removed (`main.cpp` auto_play 0).
+
 ### Controller button icons
 
 The pad prompts once drew blank: `frontend_pad.h` swapped them to textures from XtendedInput's
