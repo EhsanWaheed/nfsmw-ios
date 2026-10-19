@@ -189,6 +189,20 @@ vertex layout's contents). The efficiency work that came with it, for both rende
   still over the game.
 - Version from `RECOMP_APP_VERSION` (4.2), build number = commit count at configure time.
 
+### v4.4 (heat)
+
+- **Scheduler** (`kit/runtime/kernel32.cpp`): each guest thread sleeps on its own condition variable; a baton
+  handoff wakes only the receiver, and critical-section leaves, shim state changes and the deadline ticker wake only
+  the baton holder (a stranded baton still wakes all). Mac: ~3600 wakeups/s -> ~600, wasted ~3000/s -> 2-200.
+  `RECOMP_SCHED_STATS=1` logs the rates.
+- **Direct present** (`present_thread.cpp`): on iOS the compositor writes the drawable itself unless a capture, the
+  glass controls (their backdrop) or a placed frame need the composite. `RECOMP_PRESENT_DIRECT=0/1`.
+- **Module E skip** (`clean_chain.h`): motion blur + DoF passes skipped when their coverage is exactly 0
+  (`NFSMW_E_ALWAYS=1` runs them always); logged every 3600 frames.
+- **Hide/show hold** 2.5 s (`sdl/main.cpp` HideHold, `controls::host_toggle_hidden`); every thermal change logged.
+- **PC look**: Home greys out the MetalFX controls with a note (upscale.h stands aside for the PC look and the game's
+  own Visual Treatment / OverBright). Metal 4 without MetalFX 4 falls back to classic Metal.
+
 ### v4.3 (touch)
 
 - **Glass controls** (`kit/host/controls/overlay.cpp` draw_glass, `pad_art.cpp` glass_shape / paint_control_glass,

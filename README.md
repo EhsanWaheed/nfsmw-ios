@@ -89,6 +89,14 @@ D-pad brings it back). **Swipe through the menus** (main menu, garage, shops, pa
 finger like the PS3's, tap to choose, swipe in from the left edge to go back (Controls → Menu swipes / Reverse
 swipes). The launcher no longer starts the game by itself.
 
+**v4.4:** **cooler for longer**: the game's threads no longer wake each other thousands of times a second for
+nothing (each wakes only when it is its turn), the finished frame goes straight to the screen (one full-screen copy
+less a frame), and motion blur / depth of field are skipped on frames where they change nothing. The owner's
+10-minute race stayed at nominal temperature the whole way, rain included. **Hold one finger still for 2.5 s** on
+the screen to hide the touch controls, and again to bring them back. With the **PC** graphics preset the MetalFX
+settings are greyed out with a note (it never upscales; nor do the game's own Visual Treatment / OverBright
+options); a device with Metal 4 but no MetalFX 4 falls back to classic Metal so it still upscales.
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.
