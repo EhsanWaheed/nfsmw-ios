@@ -617,14 +617,16 @@ static void x360_engine_init(const PopModApi *api) {
         api->log(api, "core.nfsmw: Xbox 360 engine sounds off (PC sounds)");
         return;
     }
+    /* The game folder first (iOS: the copy in Documents/game, which an install does not refresh), then the game
+     * folder inside the app bundle (a private build that ships it; the mod sits at <app>/mods/core/nfsmw). */
     const char *game = getenv("RECOMP_GAME_DIR");
-    char dir[2048], probe[2200];
-    snprintf(dir, sizeof dir, "%s/X360Sound", game && *game ? game : ".");
-    snprintf(probe, sizeof probe, "%s/SOUND/ENGINE", dir);
+    char dir[2048];
     FILE *f = NULL;
-    {   /* the folder must hold at least one engine file */
-        char one[2300];
-        snprintf(one, sizeof one, "%s/GIN_BMW_M3_race.gin", probe);
+    for (int at = 0; at < 2 && !f; ++at) {
+        if (at == 0) snprintf(dir, sizeof dir, "%s/X360Sound", game && *game ? game : ".");
+        else snprintf(dir, sizeof dir, "%s/../../../game/X360Sound", api->mod_dir(api));
+        char one[2300];   /* the folder must hold at least one engine file */
+        snprintf(one, sizeof one, "%s/SOUND/ENGINE/GIN_BMW_M3_race.gin", dir);
         f = fopen(one, "rb");
         if (f) fclose(f);
     }
