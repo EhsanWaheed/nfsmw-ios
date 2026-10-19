@@ -360,3 +360,144 @@ void TouchMapper::tick(uint64_t now, std::vector<TouchAction> *out) {
         place(out, f.x0, f.y0);
     }
 }
+
+// --- MenuSwipe (input_touch.h) -------------------------------------------------------------------------------------
+
+bool MenuSwipe::finger_down(TouchPoint p, uint64_t now) {
+    if (active_)
+        return false;
+    active_ = true;
+    swiped_ = back_ = false;
+    axis_ = 0;
+    done_ = 0;
+    id_ = p.id;
+    x0_ = last_x_ = p.x;
+    y0_ = last_y_ = p.y;
+    t0_ = now;
+    return true;
+}
+
+bool MenuSwipe::take_pending(TouchPoint *out) {
+    if (!active_ || swiped_)
+        return false;
+    active_ = false;
+    *out = {id_, x0_, y0_};
+    return true;
+}
+
+void MenuSwipe::step(int scancode) {
+    queue_.push_back(scancode);
+    ++steps_;
+}
+
+void MenuSwipe::finger_motion(TouchPoint p, uint64_t now, std::vector<TouchAction> *out) {
+    if (!owns(p.id))
+        return;
+    last_x_ = p.x;
+    last_y_ = p.y;
+    if (back_)
+        return; // Back fired: the rest of this swipe does nothing
+    const double dx = p.x - x0_, dy = p.y - y0_;
+    if (!axis_) {
+        // The axis is the one the finger has clearly taken: a diagonal waits.
+        if (fabs(dx) >= kSwipeStep && fabs(dx) > 1.3 * fabs(dy))
+            axis_ = 1;
+        else if (fabs(dy) >= kSwipeStep && fabs(dy) > 1.3 * fabs(dx))
+            axis_ = 2;
+        else
+            return;
+        swiped_ = true;
+        if (axis_ == 1 && dx > 0 && x0_ - left_ < kSwipeEdge) {
+            back_ = true;
+            step(SDL_SCANCODE_ESCAPE);
+            tick(now, out);
+            return;
+        }
+    }
+    const double along = axis_ == 1 ? dx : dy;
+    // Presses so far: one at kSwipeStep, then one per kSwipeRepeat.
+    const double travel = fabs(along);
+    const int want = travel < kSwipeStep ? 0 : 1 + int((travel - kSwipeStep) / kSwipeRepeat);
+    const int have = done_ <= 0 ? 0 : int(done_);
+    if (want <= have)
+        return;
+    // Content follows the finger: a finger moving left or up shows what is right or below.
+    const bool forward = (along < 0) != reverse_;
+    const int key = axis_ == 1 ? (forward ? SDL_SCANCODE_RIGHT : SDL_SCANCODE_LEFT)
+                               : (forward ? SDL_SCANCODE_DOWN : SDL_SCANCODE_UP);
+    for (int i = have; i < want; ++i)
+        step(key);
+    done_ = want;
+    tick(now, out);
+}
+
+bool MenuSwipe::finger_up(TouchPoint p, uint64_t now, std::vector<TouchAction> *out, TouchPoint *tap) {
+    if (!owns(p.id))
+        return false;
+    finger_motion(p, now, out);
+    active_ = false;
+    if (swiped_)
+        return false;
+    // A flick: short, but fast and along one axis.
+    const double dx = p.x - x0_, dy = p.y - y0_, travel = hypot(dx, dy);
+    const double secs = double(now - t0_) / 1e9;
+    if (travel >= kSwipeFlickTravel && secs > 0 && travel / secs >= kSwipeFlickSpeed &&
+        (fabs(dx) > 1.3 * fabs(dy) || fabs(dy) > 1.3 * fabs(dx))) {
+        const bool horizontal = fabs(dx) > fabs(dy);
+        const bool forward = ((horizontal ? dx : dy) < 0) != reverse_;
+        if (horizontal && dx > 0 && x0_ - left_ < kSwipeEdge)
+            step(SDL_SCANCODE_ESCAPE);
+        else
+            step(horizontal ? (forward ? SDL_SCANCODE_RIGHT : SDL_SCANCODE_LEFT)
+                            : (forward ? SDL_SCANCODE_DOWN : SDL_SCANCODE_UP));
+        tick(now, out);
+        return false;
+    }
+    if (travel > kTouchTapTravel)
+        return false; // a slow drag that never became a swipe: nothing
+    *tap = {p.id, x0_, y0_};
+    return true;
+}
+
+void MenuSwipe::finger_cancel(int64_t id) {
+    if (owns(id))
+        active_ = false;
+}
+
+void MenuSwipe::tick(uint64_t now, std::vector<TouchAction> *out) {
+    // One key at a time: down, held kSwipeKeyHoldNs, up, then kSwipeKeyGapNs before the next.
+    while (now >= next_ns_) {
+        TouchAction a;
+        a.kind = TouchAction::Key;
+        if (held_) {
+            a.scancode = held_;
+            a.down = false;
+            out->push_back(a);
+            held_ = 0;
+            next_ns_ = now + kSwipeKeyGapNs;
+            continue;
+        }
+        if (queue_.empty())
+            return;
+        held_ = queue_.front();
+        queue_.erase(queue_.begin());
+        a.scancode = held_;
+        a.down = true;
+        out->push_back(a);
+        next_ns_ = now + kSwipeKeyHoldNs;
+    }
+}
+
+void MenuSwipe::cancel_all(std::vector<TouchAction> *out) {
+    active_ = false;
+    queue_.clear();
+    if (held_) {
+        TouchAction a;
+        a.kind = TouchAction::Key;
+        a.scancode = held_;
+        a.down = false;
+        out->push_back(a);
+        held_ = 0;
+    }
+    next_ns_ = 0;
+}

@@ -518,6 +518,80 @@ static void test_origin_moves_the_edges_onto_the_game_rectangle() {
     CHECK(out.size() == 1 && out[0].y == 70);
 }
 
+
+// --- MenuSwipe ---
+static std::vector<int> swipe_downs(const std::vector<TouchAction> &out) {
+    std::vector<int> k;
+    for (const TouchAction &a : out)
+        if (a.kind == TouchAction::Key && a.down)
+            k.push_back(a.scancode);
+    return k;
+}
+static void test_menu_swipe_follows_the_finger() {
+    MenuSwipe s;
+    std::vector<TouchAction> out;
+    const uint64_t ms = 1000000ull;
+    CHECK(s.finger_down({1, 300, 200}, 0));
+    s.finger_motion({1, 280, 201}, 20 * ms, &out);
+    CHECK(out.empty());
+    s.finger_motion({1, 260, 202}, 40 * ms, &out); // 40 left: one step, the next option (Right)
+    CHECK(swipe_downs(out) == std::vector<int>{SDL_SCANCODE_RIGHT});
+    out.clear();
+    s.finger_motion({1, 180, 203}, 80 * ms, &out); // 120 left: a second step, queued behind the first
+    CHECK(swipe_downs(out).empty());
+    s.tick(80 * ms + kSwipeKeyHoldNs, &out);       // first released
+    s.tick(80 * ms + kSwipeKeyHoldNs + kSwipeKeyGapNs, &out);
+    CHECK(swipe_downs(out) == std::vector<int>{SDL_SCANCODE_RIGHT});
+    TouchPoint tap{};
+    CHECK(!s.finger_up({1, 180, 203}, 300 * ms, &out, &tap));
+    CHECK(s.take_steps() == 2);
+}
+static void test_menu_swipe_reverse_and_vertical() {
+    MenuSwipe s;
+    s.set_reverse(true);
+    std::vector<TouchAction> out;
+    CHECK(s.finger_down({2, 300, 300}, 0));
+    s.finger_motion({2, 302, 250}, 50000000ull, &out); // up, reversed: Up
+    CHECK(swipe_downs(out) == std::vector<int>{SDL_SCANCODE_UP});
+}
+static void test_menu_swipe_tap_goes_back_to_the_mapper() {
+    MenuSwipe s;
+    std::vector<TouchAction> out;
+    CHECK(s.finger_down({3, 100, 100}, 0));
+    s.finger_motion({3, 104, 103}, 30000000ull, &out);
+    TouchPoint tap{};
+    CHECK(s.finger_up({3, 104, 103}, 90000000ull, &out, &tap));
+    CHECK(out.empty() && tap.x == 100 && tap.y == 100);
+}
+static void test_menu_swipe_from_the_left_edge_is_back() {
+    MenuSwipe s;
+    s.set_left_edge(10);
+    std::vector<TouchAction> out;
+    CHECK(s.finger_down({4, 20, 200}, 0));
+    s.finger_motion({4, 200, 205}, 100000000ull, &out);
+    CHECK(swipe_downs(out) == std::vector<int>{SDL_SCANCODE_ESCAPE});
+    out.clear();
+    s.tick(500000000ull, &out);
+    s.tick(900000000ull, &out);
+    CHECK(swipe_downs(out).empty()); // only Back, no arrows after it
+}
+static void test_menu_swipe_flick_counts_once() {
+    MenuSwipe s;
+    std::vector<TouchAction> out;
+    TouchPoint tap{};
+    CHECK(s.finger_down({5, 300, 200}, 0));
+    CHECK(!s.finger_up({5, 330, 201}, 30000000ull, &out, &tap)); // 30 pt in 30 ms: a flick right
+    CHECK(swipe_downs(out) == std::vector<int>{SDL_SCANCODE_LEFT});
+}
+static void test_menu_swipe_second_finger_takes_the_pending_one() {
+    MenuSwipe s;
+    CHECK(s.finger_down({6, 50, 60}, 0));
+    CHECK(!s.finger_down({7, 90, 60}, 1));
+    TouchPoint p{};
+    CHECK(s.take_pending(&p) && p.id == 6 && p.x == 50);
+    CHECK(!s.owns(6));
+}
+
 int main() {
     test_tap_places_one_presented_frame_before_pressing();
     test_tap_without_presents_presses_after_60_ms();
@@ -544,6 +618,12 @@ int main() {
     test_two_finger_drag_pans_with_arrows();
     test_two_finger_tap_is_right_click_three_is_f10_four_toggles_keyboard();
     test_second_finger_cancels_pending_tap();
+    test_menu_swipe_follows_the_finger();
+    test_menu_swipe_reverse_and_vertical();
+    test_menu_swipe_tap_goes_back_to_the_mapper();
+    test_menu_swipe_from_the_left_edge_is_back();
+    test_menu_swipe_flick_counts_once();
+    test_menu_swipe_second_finger_takes_the_pending_one();
     if (g_failures) {
         fprintf(stderr, "%d failures\n", g_failures);
         return 1;

@@ -8,12 +8,14 @@
 #include "../../platform/os.h"
 #include "../../runtime/layout.h"
 #include "../audio.h"
+#include "../controls/raster.h"
 #include "../launcher/launcher_sdl.h"
 #include "../present.h"
 #include "game_config.h"
 #include "version.h"
 
 #import <CoreHaptics/CoreHaptics.h>
+#import <CoreText/CoreText.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -112,7 +114,88 @@ void platform_ui_ios_prepare() {
     ios_overlay_apply_launch_settings(); // MetalFX markers, and the overlay's restart-only options
 }
 
+
+// The on-screen controls' labels in the system font, and "sf:<name>" as that SF Symbol (v4.3, the glass look;
+// controls/raster.h set_text_hook). CoreGraphics and CoreText only, so it is safe on the presenter's thread.
+static bool ios_text_hook(const char *utf8, double size_px, bool bold, controls::Rgba c, std::vector<uint8_t> *rgba, int *w,
+                   int *h) {
+    @autoreleasepool {
+        const bool symbol = strncmp(utf8, "sf:", 3) == 0;
+        CGImageRef mask = nullptr;
+        CTLineRef line = nullptr;
+        CGFloat width = 0, height = 0, ascent = 0, descent = 0;
+        const CGFloat pad = 2;
+        if (symbol) {
+            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+                configurationWithPointSize:size_px * 1.15
+                                    weight:bold ? UIImageSymbolWeightSemibold : UIImageSymbolWeightRegular];
+            UIImage *img = [UIImage systemImageNamed:[NSString stringWithUTF8String:utf8 + 3] withConfiguration:cfg];
+            if (!img || !img.CGImage)
+                return false;
+            mask = CGImageRetain(img.CGImage);
+            // The bitmap is at the screen's scale; the symbol is wanted at its point size, in pixels here.
+            width = ceil(img.size.width);
+            height = ceil(img.size.height);
+        } else {
+            NSString *str = [NSString stringWithUTF8String:utf8];
+            if (!str.length)
+                return false;
+            // size_px is the text's visible height: capitals are about 0.7 of the font size.
+            UIFont *font = [UIFont systemFontOfSize:size_px / 0.7 weight:bold ? UIFontWeightSemibold : UIFontWeightRegular];
+            NSDictionary *attrs = @{
+                (id)kCTFontAttributeName : font,
+                (id)kCTForegroundColorFromContextAttributeName : @YES,
+                (id)kCTKernAttributeName : @(size_px * 0.04),
+            };
+            NSAttributedString *as = [[NSAttributedString alloc] initWithString:str attributes:attrs];
+            line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)as);
+            CGFloat leading = 0;
+            width = ceil(CTLineGetTypographicBounds(line, &ascent, &descent, &leading));
+            height = ceil(font.capHeight);
+        }
+        const int bw = int(width + 2 * pad), bh = int(height + 2 * pad);
+        if (bw <= 0 || bh <= 0 || bw > 2048 || bh > 2048) {
+            if (mask)
+                CGImageRelease(mask);
+            if (line)
+                CFRelease(line);
+            return false;
+        }
+        rgba->assign(size_t(bw) * bh * 4, 0);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(rgba->data(), bw, bh, 8, bw * 4, cs,
+                                                 kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(cs);
+        if (!ctx) {
+            if (mask)
+                CGImageRelease(mask);
+            if (line)
+                CFRelease(line);
+            return false;
+        }
+        CGContextSetRGBFillColor(ctx, c.r / 255.0, c.g / 255.0, c.b / 255.0, c.a / 255.0);
+        CGContextSetShouldAntialias(ctx, true);
+        CGContextSetShouldSmoothFonts(ctx, false);
+        if (mask) {
+            const CGRect r = CGRectMake(pad, pad, width, height);
+            CGContextClipToMask(ctx, r, mask);
+            CGContextFillRect(ctx, r);
+            CGImageRelease(mask);
+        } else {
+            // Centred on the capitals: the baseline sits pad above the bottom.
+            CGContextSetTextPosition(ctx, pad, pad);
+            CTLineDraw(line, ctx);
+            CFRelease(line);
+        }
+        CGContextRelease(ctx);
+        *w = bw;
+        *h = bh;
+        return true;
+    }
+}
+
 void platform_ui_init_hints() {
+    controls::set_text_hook(ios_text_hook);
     // Landscape on every device (the Info.plist keys match): the game's picture
     // fills the screen edge to edge with no portrait letterbox.
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");

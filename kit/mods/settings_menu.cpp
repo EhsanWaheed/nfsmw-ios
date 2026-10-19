@@ -391,6 +391,13 @@ MenuLine line_for(const Item &it) {
         split_line(mods_controls_line(ControlsRow(it.index)), &l.label, &l.value);
         l.adjustable = it.index != CONTROLS_EDIT_ROW;
         l.timing = timing_text("live");
+        if (it.index == CONTROLS_DPAD_ROW)
+            l.help = "Adds the D-pad to the on-screen controller (the stick and menu swipes cover it).";
+        else if (it.index == CONTROLS_MENU_SWIPE_ROW)
+            l.help = "In the menus and the pause screen, swipe to move through the options, tap to choose, "
+                     "swipe in from the left edge to go back.";
+        else if (it.index == CONTROLS_SWIPE_REVERSE_ROW)
+            l.help = "Swiping left moves the selection left (off: the menu follows your finger, like the PS3's).";
         break;
     case SRC_SETTING: {
         Setting s;

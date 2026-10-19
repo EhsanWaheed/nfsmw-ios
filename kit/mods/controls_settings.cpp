@@ -22,18 +22,19 @@ std::vector<std::string> g_names = {"pad", "keys", "pad+keys"};
 // EDIT_ROW is not one of these: it is never declared or persisted.
 constexpr int kStoredRowCount = CONTROLS_EDIT_ROW;
 const char *const kKeys[kStoredRowCount] = {
-    "layout", "size", "opacity", "haptics", "pad_with_controller", "snap"};
+    "layout", "size", "opacity", "haptics", "pad_with_controller", "snap", "dpad", "menu_swipe", "swipe_reverse"};
 const char *const kLabels[kStoredRowCount] = {
     "Controls",       "Controls size",       "Controls opacity",
-    "Button haptics", "Pad with controller", "Editor snapping"};
-const int kMin[kStoredRowCount] = {0, 0, 20, 0, 0, 0};
+    "Button haptics", "Pad with controller", "Editor snapping",
+    "D-pad",          "Menu swipes",         "Reverse swipes"};
+const int kMin[kStoredRowCount] = {0, 0, 20, 0, 0, 0, 0, 0, 0};
 // The layout row's true maximum is dynamic (g_names.size()); this entry is
 // unused for it and only fills out the array.
-const int kMax[kStoredRowCount] = {0, 2, 100, 1, 1, 1};
+const int kMax[kStoredRowCount] = {0, 2, 100, 1, 1, 1, 1, 1, 1};
 
 // Written by the settings page and the on-screen tab, read by the host loop
 // that lays the controls out: each value is atomic on its own.
-std::atomic<int> values[CONTROLS_ROW_COUNT] = {0, 1, 100, 1, 0, 1, 0};
+std::atomic<int> values[CONTROLS_ROW_COUNT] = {0, 1, 100, 1, 0, 1, 0, 1, 0, 0};
 // The hidden-group bits: one 16-bit lane per form factor, packed into the
 // single stored "hidden" value with kHiddenPacked as the marker that says so.
 // A value without the marker was written by the build that kept one set of
@@ -129,6 +130,9 @@ void mods_controls_init(const char *default_layout) {
     values[CONTROLS_HAPTICS_ROW] = 1;
     values[CONTROLS_PAD_WITH_CONTROLLER_ROW] = 0;
     values[CONTROLS_SNAP_ROW] = 1;
+    values[CONTROLS_DPAD_ROW] = 0;
+    values[CONTROLS_MENU_SWIPE_ROW] = 1;
+    values[CONTROLS_SWIPE_REVERSE_ROW] = 0;
     unpack_hidden(kHiddenPacked);
 
     // Migrate a saved keypad profile the first time host.controls/layout has
@@ -196,6 +200,9 @@ void mods_controls_reset() {
     values[CONTROLS_HAPTICS_ROW] = 1;
     values[CONTROLS_PAD_WITH_CONTROLLER_ROW] = 0;
     values[CONTROLS_SNAP_ROW] = 1;
+    values[CONTROLS_DPAD_ROW] = 0;
+    values[CONTROLS_MENU_SWIPE_ROW] = 1;
+    values[CONTROLS_SWIPE_REVERSE_ROW] = 0;
     values[CONTROLS_EDIT_ROW] = 0;
     unpack_hidden(kHiddenPacked);
     hidden_dirty = false;
@@ -245,7 +252,7 @@ PopModStatus mods_controls_nudge(ControlsRow row, int delta) {
         value = std::clamp(current + delta, 0, 2);
     } else if (row == CONTROLS_OPACITY_ROW) {
         value = std::clamp(current + delta * 10, 20, 100);
-    } else { // haptics, pad_with_controller, snap: plain toggles
+    } else { // haptics, pad_with_controller, snap, dpad, menu_swipe, swipe_reverse: plain toggles
         value = current ? 0 : 1;
     }
     return mods_controls_set(row, value);
@@ -279,6 +286,11 @@ std::string mods_controls_line(ControlsRow row) {
     case CONTROLS_SNAP_ROW:
         snprintf(buf, sizeof buf, "%-22s %s", "Editor snapping",
                  mods_controls_value(row) ? "on" : "off");
+        break;
+    case CONTROLS_DPAD_ROW:
+    case CONTROLS_MENU_SWIPE_ROW:
+    case CONTROLS_SWIPE_REVERSE_ROW:
+        snprintf(buf, sizeof buf, "%-22s %s", kLabels[row], mods_controls_value(row) ? "on" : "off");
         break;
     case CONTROLS_EDIT_ROW:
         snprintf(buf, sizeof buf, "%-22s %s", "Edit controls", ">");

@@ -166,3 +166,68 @@ class TouchMapper {
     double centroid_y() const;
     void reset_gesture();
 };
+
+// Swipes through the game's own menus (v4.3: the front end and the pause screen, while the host says so). One finger
+// on the game image: a swipe of kSwipeStep along one axis presses an arrow key, and every further kSwipeRepeat along
+// the same axis presses it again; a quick flick shorter than a step still counts once. By default the menu follows
+// the finger, like the PS3's XMB: swiping left brings the next option in from the right (Right arrow), swiping up
+// moves down a list (Down arrow); `reverse` swaps both. A swipe that starts within kSwipeEdge of the image's left side
+// and goes right is Back (Escape). A finger that never travels is not this class's: the caller gets it back as a
+// tap at the point it landed, for the gesture mapper's click. Keys are held for kSwipeKeyHoldNs with
+// kSwipeKeyGapNs between two presses, so a game sampling once a frame sees each one.
+constexpr double kSwipeStep = 36.0;
+constexpr double kSwipeRepeat = 72.0;
+constexpr double kSwipeEdge = 28.0;
+constexpr double kSwipeFlickTravel = 22.0;
+constexpr double kSwipeFlickSpeed = 500.0; // points per second
+constexpr uint64_t kSwipeKeyHoldNs = 90ull * 1000000ull;
+constexpr uint64_t kSwipeKeyGapNs = 60ull * 1000000ull;
+
+class MenuSwipe {
+  public:
+    void set_reverse(bool reverse) {
+        reverse_ = reverse;
+    }
+    // The game image's left side, in window points (portrait: inside the window).
+    void set_left_edge(double x) {
+        left_ = x;
+    }
+    // A finger lands. True: it is this class's until it lifts. False: a finger is already tracked; the caller hands
+    // this one, and the tracked one if take_pending() returns it, to the gesture mapper.
+    bool finger_down(TouchPoint p, uint64_t now_ns);
+    // The tracked finger has not swiped yet and a second finger came: it goes to the gesture mapper after all, as a
+    // finger that landed at *out. False when there is none (or it is already swiping, and stays here).
+    bool take_pending(TouchPoint *out);
+    bool owns(int64_t id) const {
+        return active_ && id_ == id;
+    }
+    void finger_motion(TouchPoint p, uint64_t now_ns, std::vector<TouchAction> *out);
+    // The finger lifts. True when it never swiped: a tap at *tap (where it landed) for the gesture mapper.
+    bool finger_up(TouchPoint p, uint64_t now_ns, std::vector<TouchAction> *out, TouchPoint *tap);
+    void finger_cancel(int64_t id);
+    // Presses and releases the queued keys on time. Call once per pump.
+    void tick(uint64_t now_ns, std::vector<TouchAction> *out);
+    // How many arrow or Back presses have started since the last call (for a haptic tick each).
+    int take_steps() {
+        const int n = steps_;
+        steps_ = 0;
+        return n;
+    }
+    // Focus loss: drops the finger, releases a held key and forgets the queue.
+    void cancel_all(std::vector<TouchAction> *out);
+
+  private:
+    void step(int scancode);
+    bool reverse_ = false;
+    double left_ = 0;
+    bool active_ = false, swiped_ = false, back_ = false;
+    int axis_ = 0; // 0 none yet, 1 horizontal, 2 vertical
+    int64_t id_ = 0;
+    double x0_ = 0, y0_ = 0, last_x_ = 0, last_y_ = 0;
+    double done_ = 0; // travel along the axis already turned into presses
+    uint64_t t0_ = 0;
+    std::vector<int> queue_;
+    int held_ = 0; // the key down now (0: none)
+    uint64_t next_ns_ = 0;
+    int steps_ = 0;
+};

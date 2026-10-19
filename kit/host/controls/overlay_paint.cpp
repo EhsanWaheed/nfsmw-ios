@@ -113,7 +113,7 @@ void paint_editor(Canvas &c, const ControlsView &view, const Rect &r) {
         paint_editor_key(c, d, r);
 }
 
-void paint_layer(Canvas &c, const ControlsView &view, int layer, const Rect &r) {
+void paint_layer(Canvas &c, const ControlsView &view, int layer, const Rect &r, bool glass) {
     // The editor owns the one layer it publishes; nothing else is drawn.
     if (view.editing) {
         paint_editor(c, view, r);
@@ -123,15 +123,19 @@ void paint_layer(Canvas &c, const ControlsView &view, int layer, const Rect &r) 
     if (layer == 0 && !view.controls_area.empty())
         c.rect(view.controls_area.x - r.x, view.controls_area.y - r.y, view.controls_area.w,
                view.controls_area.h, flat(12, 14, 18, 255));
-    for (size_t i = 0; i < view.backdrops.size(); ++i) {
+    for (size_t i = 0; !glass && i < view.backdrops.size(); ++i) {
         if (i >= view.backdrop_layers.size() || view.backdrop_layers[i] != layer)
             continue;
         const Rect &b = view.backdrops[i];
         c.rect(b.x - r.x, b.y - r.y, b.w, b.h, flat(6, 9, 15, 150));
     }
     for (const DrawControl &d : view.controls)
-        if (d.layer == layer)
-            paint_one(c, d, r);
+        if (d.layer == layer) {
+            if (glass)
+                paint_control_glass(c, d, r.x, r.y);
+            else
+                paint_one(c, d, r);
+        }
 }
 
 void paint_overlay(Canvas &c, const ControlsView &view, const Rect &r) {

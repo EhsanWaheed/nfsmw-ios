@@ -29,7 +29,11 @@ void Overlay::release() {
                 device_->destroy(t.texture);
         if (knob_)
             device_->destroy(knob_);
+        if (dummy_)
+            device_->destroy(dummy_);
     }
+    dummy_ = gpu::Texture();
+    glass_state_ = -1;
     layers_.clear();
     knob_ = gpu::Texture();
     knob_opacity_ = -1;
@@ -53,8 +57,9 @@ void Overlay::update_layer(gpu::Device *device, const ControlsView &view, int in
     if (t.rect.empty())
         return;
     pixels_.assign(size_t(t.rect.w) * t.rect.h * 4, 0);
-    Canvas c(pixels_, t.rect.w, t.rect.h, view.opacity);
-    paint_layer(c, view, index, t.rect);
+    // The glass look's glyphs stay solid over the glass whatever the opacity setting (the glass itself fades).
+    Canvas c(pixels_, t.rect.w, t.rect.h, glass_ ? std::min(1.0, 0.35 + view.opacity) : view.opacity);
+    paint_layer(c, view, index, t.rect, glass_);
     if (!t.texture || t.tex_w != t.rect.w || t.tex_h != t.rect.h) {
         if (t.texture)
             device->destroy(t.texture);
@@ -117,13 +122,101 @@ void Overlay::blit(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture targ
     device->end_render_pass(cb);
 }
 
+// Whether this device has the "glass" pipeline (Metal only); asked once.
+bool Overlay::glass_available(gpu::Device *device, gpu::Format format) {
+#if defined(__APPLE__)
+    if (glass_state_ < 0) {
+        gpu::RenderState state;
+        state.color_format[0] = format;
+        state.color_count = 1;
+        state.blend_enabled = true;
+        state.src_rgb = state.src_alpha = gpu::Blend::One;
+        state.dst_rgb = state.dst_alpha = gpu::Blend::OneMinusSrcAlpha;
+        glass_state_ = device->render_pipeline("glass", state) ? 1 : 0;
+    }
+    return glass_state_ == 1;
+#else
+    (void)device;
+    (void)format;
+    return false;
+#endif
+}
+
+// One glass piece per control (or, with `knobs`, per held or resting stick knob), each its own small quad: the
+// fragment shader only runs over the controls and a shadow margin around them.
+void Overlay::draw_glass(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture target, int w, int h,
+                         const ControlsView &view, const Backdrop &backdrop, bool knobs) {
+    std::vector<GlassShape> shapes;
+    for (const DrawControl &d : view.controls) {
+        if (d.kind == Kind::Stick && knobs) {
+            if (d.radius_px > 0)
+                shapes.push_back(glass_knob(d));
+            continue;
+        }
+        GlassShape g;
+        if (!knobs && glass_shape(d, &g))
+            shapes.push_back(g);
+    }
+    if (shapes.empty())
+        return;
+    gpu::RenderState state;
+    state.color_format[0] = device->describe(target).format;
+    state.color_count = 1;
+    state.blend_enabled = true;
+    state.src_rgb = state.src_alpha = gpu::Blend::One;
+    state.dst_rgb = state.dst_alpha = gpu::Blend::OneMinusSrcAlpha;
+    gpu::Pipeline pipeline = device->render_pipeline("glass", state);
+    if (!pipeline)
+        return;
+    gpu::RenderPass pass;
+    pass.color_count = 1;
+    pass.color[0].texture = target;
+    pass.color[0].load = gpu::Load::Load;
+    pass.color[0].store = gpu::Store::Store;
+    device->begin_render_pass(cb, pass);
+    device->set_pipeline(cb, pipeline);
+    gpu::SamplerState linear;
+    linear.mag = linear.min = gpu::Filter::Linear;
+    const bool has_bd = backdrop.texture && backdrop.w > 0 && backdrop.h > 0;
+    if (!has_bd && !dummy_) {
+        // The shader declares the backdrop; without one it is bound to a pixel it never reads.
+        dummy_ = device->create_texture({1, 1, gpu::Format::RGBA8, gpu::UsageSampled | gpu::UsageCpu, 1});
+        const uint8_t px0[4] = {0, 0, 0, 255};
+        if (dummy_)
+            device->upload(dummy_, {0, 0, 1, 1}, px0, 4);
+    }
+    device->set_texture(cb, gpu::Stage::Fragment, 0, has_bd ? backdrop.texture : dummy_);
+    device->set_sampler(cb, gpu::Stage::Fragment, 0, linear);
+    const double px = view.px_per_pt;
+    // The glass fades with the opacity setting, but never below a third (it is mostly the picture anyway).
+    const double fade = std::clamp(view.opacity * 1.2, 0.35, 1.0);
+    for (const GlassShape &g : shapes) {
+        const float u[20] = {float(g.rect.x), float(g.rect.y), float(g.rect.w), float(g.rect.h),
+                             float(w), float(h), float(backdrop.x), float(backdrop.y),
+                             g.tint[0], g.tint[1], g.tint[2], g.tint[3],
+                             float(g.radius), float(g.pressed), float(g.alpha * fade), float(px),
+                             float(backdrop.w), float(backdrop.h), has_bd ? 1.0f : 0.0f, float(6.0 * px)};
+        device->set_bytes(cb, gpu::Stage::Vertex, 0, u, sizeof u);
+        device->set_bytes(cb, gpu::Stage::Fragment, 0, u, sizeof u);
+        device->draw(cb, gpu::Primitive::TriangleStrip, 0, 4);
+    }
+    device->end_render_pass(cb);
+}
+
 void Overlay::draw(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture target, int w, int h,
-                   const ControlsView &view) {
+                   const ControlsView &view, const Backdrop &backdrop) {
     if (!device || !target || !cb || w <= 0 || h <= 0 || !view.wanted)
         return;
     if (device_ != device) {
         release();
         device_ = device;
+    }
+    // The glass look, where it can be drawn; switching it repaints every layer.
+    const bool glass = view.glass && !view.editing && glass_available(device, device->describe(target).format);
+    if (glass != glass_) {
+        glass_ = glass;
+        for (LayerTexture &t : layers_)
+            t.built = false;
     }
     // A different layer count (a new layout) starts every layer afresh.
     if (layers_.size() != view.layers.size()) {
@@ -141,6 +234,14 @@ void Overlay::draw(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture targ
     }
     dw_ = w;
     dh_ = h;
+    if (glass_) {
+        // Glass under, the glyphs and labels on it, then the sticks' knobs over both.
+        draw_glass(device, cb, target, w, h, view, backdrop, false);
+        if (!quads_.empty())
+            blit(device, cb, target, w, h);
+        draw_glass(device, cb, target, w, h, view, backdrop, true);
+        return;
+    }
     // Every held stick's knob, at its base plus the offset.
     for (const DrawControl &d : view.controls) {
         if (d.kind != Kind::Stick || !d.pressed || d.radius_px <= 0)

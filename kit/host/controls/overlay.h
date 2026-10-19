@@ -45,6 +45,8 @@ struct ControlsView {
     uint64_t revision = 0; // changes when anything below changes
     int dw = 0, dh = 0;
     double opacity = 1.0;
+    double px_per_pt = 1.0; // drawable pixels per point (the glass's rim and blur scale with it)
+    bool glass = false;     // v4.3: the Liquid Glass look where the backend can draw it (Overlay decides)
     std::vector<DrawControl> controls;
     std::vector<Rect> backdrops; // visible grid groups' boxes, drawn under their keys
     Rect controls_area;          // portrait: fill with the backdrop colour (Task 17)
@@ -91,6 +93,13 @@ ControlsView make_view(const Layout &l, const Router &r, const Screen &s, double
 // everything drawn here.
 ControlsView make_view(const Editor &e, const Screen &s);
 
+// The finished frame under the controls, for the glass to bend (v4.3): its texture and where its (0, 0) sits in
+// the drawable. No texture: the glass is frosted over a plain dark tone instead.
+struct Backdrop {
+    gpu::Texture texture;
+    int x = 0, y = 0, w = 0, h = 0;
+};
+
 class Overlay {
   public:
     ~Overlay();
@@ -98,7 +107,7 @@ class Overlay {
     // then blends the layers and held knobs over `target`. Nothing while
     // !view.wanted.
     void draw(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture target, int w, int h,
-              const ControlsView &view);
+              const ControlsView &view, const Backdrop &backdrop = {});
 
   private:
     struct Quad {
@@ -117,6 +126,9 @@ class Overlay {
     void update_layer(gpu::Device *device, const ControlsView &view, int index, int w, int h);
     void update_knob(gpu::Device *device, double opacity);
     void blit(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture target, int w, int h);
+    bool glass_available(gpu::Device *device, gpu::Format format);
+    void draw_glass(gpu::Device *device, gpu::CommandBuffer cb, gpu::Texture target, int w, int h,
+                    const ControlsView &view, const Backdrop &backdrop, bool knobs);
 
     gpu::Device *device_ = nullptr;
     std::vector<LayerTexture> layers_;
@@ -125,6 +137,9 @@ class Overlay {
     double knob_opacity_ = -1;
     std::vector<uint8_t> pixels_; // scratch for the layer being rasterized
     std::vector<Quad> quads_;     // this frame's blits, reused
+    bool glass_ = false;          // the layers were painted for the glass look
+    gpu::Texture dummy_;          // bound as the glass's backdrop when there is none
+    int glass_state_ = -1;        // -1 not tried, 0 no glass pipeline, 1 there is one
 };
 
 } // namespace controls

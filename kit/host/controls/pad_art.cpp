@@ -289,4 +289,171 @@ void paint_control(Canvas &cv, const DrawControl &c, int ox, int oy) {
     }
 }
 
+// --- the glass look (v4.3) ------------------------------------------------------------------------------------------
+
+namespace {
+
+const Rgba kGlassLabel{255, 255, 255, 235};
+
+// The PlayStation colours, as the glyphs draw them.
+void face_tint(PadButton b, float out[3]) {
+    switch (b) {
+    case PadButton::Cross: out[0] = 0.49f, out[1] = 0.70f, out[2] = 0.91f; return;
+    case PadButton::Circle: out[0] = 1.00f, out[1] = 0.40f, out[2] = 0.40f; return;
+    case PadButton::Square: out[0] = 1.00f, out[1] = 0.41f, out[2] = 0.97f; return;
+    case PadButton::Triangle: out[0] = 0.25f, out[1] = 0.89f, out[2] = 0.63f; return;
+    default: out[0] = out[1] = out[2] = 1.0f; return;
+    }
+}
+
+bool is_face(PadButton b) {
+    return b == PadButton::Cross || b == PadButton::Circle || b == PadButton::Square || b == PadButton::Triangle;
+}
+
+bool is_shoulder(PadButton b) {
+    return b == PadButton::L1 || b == PadButton::R1 || b == PadButton::L2 || b == PadButton::R2;
+}
+
+// A control's label for the glass: the PS button is the PlayStation logo when the platform can draw it.
+std::string glass_label(const DrawControl &c) {
+    const bool symbols = have_text_hook();
+    if (c.label.rfind("sf:", 0) == 0)
+        return c.label;
+    if (c.kind == Kind::Button && c.label.empty() && c.button == PadButton::Ps && symbols)
+        return "sf:playstation.logo";
+    // The built-ins' settings button (F10 on a PC) and the layout tabs, as the system draws them.
+    if (symbols && c.kind == Kind::Action && c.label == "F10")
+        return "sf:gearshape.fill";
+    if (c.kind == Kind::Toggle) {
+        const std::string &t = c.group_visible ? c.label : c.label_off;
+        if (symbols && t == "KEYS")
+            return "sf:keyboard";
+        if (symbols && t == "PAD")
+            return "sf:gamecontroller.fill";
+        return t;
+    }
+    if (c.kind == Kind::Button && c.label.empty() && c.button == PadButton::Select)
+        return "SELECT";
+    if (c.kind == Kind::Button && c.label.empty() && c.button == PadButton::Start)
+        return "START";
+    return label_of(c);
+}
+
+} // namespace
+
+void paint_control_glass(Canvas &cv, const DrawControl &c, int ox, int oy) {
+    const double x = c.rect.x - ox, y = c.rect.y - oy, w = c.rect.w, h = c.rect.h;
+    if (w <= 0 || h <= 0)
+        return;
+    const double cx = x + w / 2, cy = y + h / 2;
+    switch (c.kind) {
+    case Kind::Button: {
+        const double r = std::min(w, h) / 2;
+        if (is_face(c.button) && c.label.empty()) {
+            face_glyph(cv, c.button, cx, cy, r * 0.92);
+            break;
+        }
+        const std::string s = glass_label(c);
+        const bool small = c.button == PadButton::Select || c.button == PadButton::Start;
+        const double size = is_shoulder(c.button) ? h * 0.42 : small ? h * 0.38 : r * 0.62;
+        cv.label(cx, cy, s.c_str(), size, w * 0.8, kGlassLabel);
+        break;
+    }
+    case Kind::Dpad: {
+        // Four chevron arrows; a lit direction in the cross's blue.
+        const double r = std::min(w, h) / 2, a = r * 0.17, out = r * 0.80, in = r * 0.56;
+        const uint8_t bits[4] = {1, 2, 4, 8};
+        const double dirs[4][2] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+        for (int i = 0; i < 4; ++i) {
+            const double ux = dirs[i][0], uy = dirs[i][1], vx = -uy, vy = ux;
+            const Rgba col = (c.hat & bits[i]) ? kLit : kGlassLabel;
+            cv.stroke({{cx + ux * in + vx * a * 1.6, cy + uy * in + vy * a * 1.6},
+                       {cx + ux * out, cy + uy * out},
+                       {cx + ux * in - vx * a * 1.6, cy + uy * in - vy * a * 1.6}},
+                      std::max(2.0, r * 0.07), false, flat(col));
+        }
+        break;
+    }
+    case Kind::Stick:
+        break; // its base and knob are all glass
+    case Kind::Key:
+    case Kind::Action:
+    case Kind::Toggle: {
+        const std::string s = glass_label(c);
+        cv.label(cx, cy, s.c_str(), std::min(h * 0.42, w * 0.5), w * 0.86,
+                 c.lit ? Rgba{10, 14, 24, 255} : kGlassLabel);
+        break;
+    }
+    }
+}
+
+bool glass_shape(const DrawControl &c, GlassShape *g) {
+    const Rect &r = c.rect;
+    if (r.w <= 0 || r.h <= 0)
+        return false;
+    *g = GlassShape{};
+    g->rect = r;
+    g->pressed = c.pressed ? 1.0 : 0.0;
+    const auto circle = [&](double cx, double cy, double rad) {
+        g->rect = Rect{int(std::lround(cx - rad)), int(std::lround(cy - rad)), int(std::lround(2 * rad)),
+                       int(std::lround(2 * rad))};
+        g->radius = rad;
+    };
+    switch (c.kind) {
+    case Kind::Button:
+        if (is_shoulder(c.button)) {
+            g->radius = std::min(r.w, r.h) * 0.42;
+        } else if (c.button == PadButton::Select || c.button == PadButton::Start) {
+            g->radius = r.h / 2.0;
+        } else {
+            circle(r.x + r.w / 2.0, r.y + r.h / 2.0, std::min(r.w, r.h) / 2.0);
+            if (is_face(c.button)) {
+                face_tint(c.button, g->tint);
+                g->tint[3] = c.pressed ? 0.30f : 0.08f;
+            }
+        }
+        return true;
+    case Kind::Dpad:
+        circle(r.x + r.w / 2.0, r.y + r.h / 2.0, std::min(r.w, r.h) / 2.0);
+        g->pressed = c.hat ? 0.5 : 0.0;
+        return true;
+    case Kind::Stick: {
+        const double rad = c.radius_px > 0 ? c.radius_px : std::min(r.w, r.h) / 2.0;
+        if (c.pressed)
+            circle(c.base_x, c.base_y, rad);
+        else
+            circle(r.x + r.w / 2.0, r.y + r.h / 2.0, rad);
+        g->pressed = 0;
+        // A floating stick at rest is only a hint of where to put the thumb.
+        g->alpha = c.floating && !c.pressed ? 0.35 : 0.85;
+        return true;
+    }
+    case Kind::Key:
+        g->radius = std::min(r.w, r.h) * 0.26;
+        if (c.lit) {
+            g->tint[0] = 0.55f, g->tint[1] = 0.70f, g->tint[2] = 1.0f, g->tint[3] = 0.55f;
+        }
+        return true;
+    case Kind::Action:
+    case Kind::Toggle:
+        g->radius = r.h / 2.0;
+        return true;
+    }
+    return false;
+}
+
+GlassShape glass_knob(const DrawControl &c) {
+    GlassShape g;
+    const double kr = knob_radius(c.radius_px);
+    const double cx = c.pressed ? c.base_x + c.knob_x * c.radius_px : c.rect.x + c.rect.w / 2.0;
+    const double cy = c.pressed ? c.base_y + c.knob_y * c.radius_px : c.rect.y + c.rect.h / 2.0;
+    g.rect = Rect{int(std::lround(cx - kr)), int(std::lround(cy - kr)), int(std::lround(2 * kr)),
+                  int(std::lround(2 * kr))};
+    g.radius = kr;
+    g.pressed = c.pressed ? 0.6 : 0.0;
+    g.tint[3] = 0.04f;
+    g.alpha = c.floating && !c.pressed ? 0.45 : 1.0;
+    return g;
+}
+
 } // namespace controls

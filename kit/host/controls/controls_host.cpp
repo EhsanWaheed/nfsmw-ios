@@ -200,6 +200,25 @@ RumbleRouter g_rumble(RumbleOutputs{
 // layout under the player's fingers, and nothing else would ever lift the
 // keys or mouse buttons a held pad button stood for. "" (the Hidden choice)
 // or a failed load leaves no layout.
+// v4.3: the D-pad setting (CONTROLS_DPAD_ROW). Off takes the D-pads out of the loaded layout; the editor gets the
+// file's own layout back (g_keep_dpad), so a saved layout never loses one.
+bool g_loaded_dpad = false;
+bool g_keep_dpad = false;
+bool dpad_wanted() {
+    return mods_controls_value(CONTROLS_DPAD_ROW) != 0;
+}
+void drop_dpads(Layout *l) {
+    for (Group &g : l->groups) {
+        if (g.has_grid)
+            continue;
+        std::vector<Control> kept;
+        for (Control &c : g.controls)
+            if (c.kind != Kind::Dpad)
+                kept.push_back(std::move(c));
+        g.controls = std::move(kept);
+    }
+}
+
 void reload(const std::string &name, Form form) {
     g_router.set_layout(nullptr, g_sink); // releases against the old layout
     std::vector<TouchAction> released;
@@ -230,6 +249,9 @@ void reload(const std::string &name, Form form) {
         fprintf(stderr, "[controls] no %s layout \"%s\"; using the tablet one\n", form_name(form),
                 name.c_str());
     }
+    g_loaded_dpad = dpad_wanted() || g_keep_dpad;
+    if (!g_loaded_dpad)
+        drop_dpads(&fresh);
     g_layout = std::move(fresh);
     g_content = layout_content(g_layout);
     g_file_scale = g_layout.scale;
@@ -349,6 +371,16 @@ void open_editor() {
         close_editor();
         return;
     }
+    if (!g_loaded_dpad) {
+        // The editor edits the file's layout, D-pads included.
+        g_keep_dpad = true;
+        reload(g_loaded_name, g_loaded_form);
+        g_keep_dpad = false;
+        if (!g_have_layout) {
+            close_editor();
+            return;
+        }
+    }
     // A finger still on a control when the editor opens never reaches the
     // router's finger_up, so whatever it held would stay down all session.
     release_everything();
@@ -377,6 +409,8 @@ void close_editor() {
     g_editor.close();
     g_editor_renamed = false;
     mods_controls_set_editing(false);
+    if (g_loaded_dpad != dpad_wanted())
+        g_force_reload = true; // the D-pad setting applies again
 }
 
 void publish() {
@@ -393,6 +427,7 @@ void publish() {
         view = make_view(g_layout, g_router, g_screen,
                          g_layout.opacity * mods_controls_value(CONTROLS_OPACITY_ROW) / 100.0);
     view.wanted = wanted;
+    view.glass = true; // v4.3: Liquid Glass wherever the presenter's device can draw it (overlay.h)
     if (g_published && g_published_wanted == wanted &&
         (!wanted || g_published_revision == view.revision))
         return;
@@ -553,7 +588,8 @@ void host_pump(uint64_t now) {
     // active layout is read again even when its name did not change.
     if (next != EditorNext::Keep)
         g_force_reload = true;
-    if (g_force_reload || !g_loaded || name != g_loaded_name || form != g_loaded_form) {
+    if (g_force_reload || !g_loaded || name != g_loaded_name || form != g_loaded_form ||
+        (!g_editor.is_open() && dpad_wanted() != g_loaded_dpad)) {
         g_force_reload = false;
         reload(mods_controls_layout_name(), form);
     }

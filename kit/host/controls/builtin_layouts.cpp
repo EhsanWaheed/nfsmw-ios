@@ -227,6 +227,10 @@ std::string pad_and_keys_tablet() {
 // tablet pad keeps the hidden-group bits, which are stored per layout name,
 // meaning the same thing after a rotation.
 
+// v4.3: the Liquid Glass controller (overlay.cpp draws it). Floating sticks: the left one, for steering, takes the
+// whole lower left; the right one sits left of the face buttons. Face buttons in the corner, the triggers (R2 gas,
+// L2 brake) big along the top edges, Select / PS / Start small at the bottom centre. The D-pad is there for the
+// D-pad setting (controls_host.cpp takes it out while that is off), right of the left stick's home.
 const char *kPadPhoneLandscape = R"JSON({
   "version": 1,
   "name": "pad",
@@ -236,35 +240,35 @@ const char *kPadPhoneLandscape = R"JSON({
       "id": "sticks",
       "controls": [
         {"kind": "stick", "stick": "left", "mode": "floating", "anchor": "bottom-left",
-         "x": 24, "y": 24, "radius": 70},
+         "x": 24, "y": 24, "radius": 64, "zone": [190, 200]},
         {"kind": "stick", "stick": "right", "mode": "floating", "anchor": "bottom-right",
-         "x": 24, "y": 24, "radius": 70}
+         "x": 200, "y": 44, "radius": 52, "zone": [112, 112]}
       ]
     },
     {
       "id": "buttons",
       "controls": [
-        {"kind": "dpad", "anchor": "bottom-left", "x": 170, "y": 24, "size": 100},
-        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 231, "y": 123, "size": 48},
-        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 180, "y": 72, "size": 48},
-        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 231, "y": 21, "size": 48},
-        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 282, "y": 72, "size": 48},
-        {"kind": "button", "button": "l1", "anchor": "top-left", "x": 24, "y": 12, "w": 80, "h": 34},
-        {"kind": "button", "button": "l2", "anchor": "top-left", "x": 24, "y": 52, "w": 80, "h": 34},
-        {"kind": "button", "button": "r1", "anchor": "top-right", "x": 24, "y": 12, "w": 80, "h": 34},
-        {"kind": "button", "button": "r2", "anchor": "top-right", "x": 24, "y": 52, "w": 80, "h": 34},
-        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -58, "y": 8, "w": 56, "h": 26},
-        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 8, "w": 56, "h": 26},
-        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 58, "y": 8, "w": 56, "h": 26}
+        {"kind": "dpad", "anchor": "bottom-left", "x": 222, "y": 44, "size": 100},
+        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 76, "y": 128, "size": 54},
+        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 18, "y": 72, "size": 54},
+        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 76, "y": 16, "size": 54},
+        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 134, "y": 72, "size": 54},
+        {"kind": "button", "button": "l1", "anchor": "top-left", "x": 20, "y": 10, "w": 104, "h": 36},
+        {"kind": "button", "button": "l2", "anchor": "top-left", "x": 20, "y": 54, "w": 120, "h": 54},
+        {"kind": "button", "button": "r1", "anchor": "top-right", "x": 20, "y": 10, "w": 104, "h": 36},
+        {"kind": "button", "button": "r2", "anchor": "top-right", "x": 20, "y": 54, "w": 120, "h": 54},
+        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -66, "y": 8, "w": 64, "h": 28},
+        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 6, "size": 34},
+        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 66, "y": 8, "w": 64, "h": 28}
       ]
     },
     {
       "id": "tabs",
       "controls": [
         {"kind": "toggle", "target": "next", "label": "KEYS", "anchor": "top-center",
-         "y": 8, "w": 72, "h": 28},
+         "x": -34, "y": 8, "w": 60, "h": 30},
         {"kind": "action", "action": "settings", "label": "F10", "anchor": "top-center",
-         "x": 68, "y": 8, "w": 56, "h": 28}
+         "x": 34, "y": 8, "w": 44, "h": 30}
       ]
     }
   ]

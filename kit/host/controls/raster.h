@@ -29,6 +29,14 @@ struct Paint {
     bool replace = false;
 };
 
+// v4.3: a platform text rasterizer for the glass look's labels (iOS: CoreText, and "sf:<name>" draws that SF
+// Symbol). Writes a premultiplied RGBA bitmap of the text in `color` at `size_px` (the cap-to-baseline line
+// height) into *rgba, *w x *h; false when it cannot. Without one, Canvas::label falls back to the 6x8 font.
+using TextHook = bool (*)(const char *utf8, double size_px, bool bold, Rgba color, std::vector<uint8_t> *rgba,
+                          int *w, int *h);
+void set_text_hook(TextHook hook);
+bool have_text_hook();
+
 // Premultiplied RGBA, source-over (or, with Paint::replace, plain
 // overwrite), anti-aliased by 4x4 supersampled coverage.
 class Canvas {
@@ -53,6 +61,9 @@ class Canvas {
     // 6x8 glyphs at `scale`x: 6*scale pixels per column, 8*scale per row.
     void text(int x, int y, const char *s, Rgba c, int scale = 2, bool replace = false);
     int text_width(const char *s, int scale = 2) const;
+    // Text centred on (cx, cy) about size_px tall, no wider than max_w: the text hook's when there is one (cached
+    // per string, size and colour), else the 6x8 font at the largest scale that fits.
+    void label(double cx, double cy, const char *s, double size_px, double max_w, Rgba c, bool bold = true);
     Rgba at(int x, int y) const;
 
   private:

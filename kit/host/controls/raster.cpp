@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <tuple>
 
 namespace controls {
 
@@ -232,6 +236,83 @@ Rgba Canvas::at(int x, int y) const {
         return Rgba{};
     const uint8_t *p = &px_[(size_t(y) * w_ + x) * 4];
     return Rgba{p[0], p[1], p[2], p[3]};
+}
+
+} // namespace controls
+
+namespace controls {
+
+namespace {
+TextHook g_text_hook = nullptr;
+struct TextBitmap {
+    std::vector<uint8_t> px;
+    int w = 0, h = 0;
+    bool ok = false;
+};
+// The overlay re-rasterizes a layer on every press; the labels in it do not change.
+std::mutex g_text_mutex;
+std::map<std::tuple<std::string, int, bool, uint32_t>, TextBitmap> g_text_cache;
+} // namespace
+
+void set_text_hook(TextHook hook) {
+    std::lock_guard lock(g_text_mutex);
+    g_text_hook = hook;
+    g_text_cache.clear();
+}
+
+bool have_text_hook() {
+    std::lock_guard lock(g_text_mutex);
+    return g_text_hook != nullptr;
+}
+
+// Under g_text_mutex: the hook's bitmap for these, from the cache; nullptr when there is no hook or it failed.
+static const TextBitmap *text_bitmap(const char *s, double size_px, bool bold, Rgba c) {
+    if (!g_text_hook)
+        return nullptr;
+    const uint32_t rgba = uint32_t(c.r) | uint32_t(c.g) << 8 | uint32_t(c.b) << 16 | uint32_t(c.a) << 24;
+    auto key = std::make_tuple(std::string(s), int(std::lround(size_px * 4)), bold, rgba);
+    auto it = g_text_cache.find(key);
+    if (it == g_text_cache.end()) {
+        if (g_text_cache.size() > 512)
+            g_text_cache.clear();
+        TextBitmap t;
+        t.ok = g_text_hook(s, size_px, bold, c, &t.px, &t.w, &t.h) && t.w > 0 && t.h > 0 &&
+               t.px.size() >= size_t(t.w) * t.h * 4;
+        it = g_text_cache.emplace(key, std::move(t)).first;
+    }
+    return it->second.ok ? &it->second : nullptr;
+}
+
+void Canvas::label(double cx, double cy, const char *s, double size_px, double max_w, Rgba c, bool bold) {
+    if (!s || !*s || size_px < 1)
+        return;
+    {
+        std::lock_guard lock(g_text_mutex);
+        const TextBitmap *bm = text_bitmap(s, size_px, bold, c);
+        if (bm && bm->w > max_w && max_w > 4)
+            bm = text_bitmap(s, std::max(4.0, size_px * max_w / bm->w), bold, c) ?: bm;
+        if (bm) {
+            // Source-over at the canvas opacity.
+            const int x0 = int(std::lround(cx - bm->w / 2.0)), y0 = int(std::lround(cy - bm->h / 2.0));
+            for (int y = std::max(0, -y0); y < bm->h && y0 + y < h_; ++y)
+                for (int x = std::max(0, -x0); x < bm->w && x0 + x < w_; ++x) {
+                    const uint8_t *sp = &bm->px[(size_t(y) * bm->w + x) * 4];
+                    const double sa = sp[3] / 255.0 * opacity_;
+                    if (sa <= 0)
+                        continue;
+                    uint8_t *dp = &px_[(size_t(y0 + y) * w_ + x0 + x) * 4];
+                    for (int k = 0; k < 4; ++k)
+                        dp[k] = uint8_t(std::clamp<long>(std::lround(sp[k] * opacity_ + dp[k] * (1.0 - sa)), 0, 255));
+                }
+            return;
+        }
+    }
+    if (std::strncmp(s, "sf:", 3) == 0)
+        return; // a symbol needs the hook
+    int scale = std::max(1, int(size_px / 8));
+    while (scale > 1 && text_width(s, scale) > max_w)
+        --scale;
+    text(int(std::lround(cx - text_width(s, scale) / 2.0)), int(std::lround(cy - 4.0 * scale)), s, c, scale);
 }
 
 } // namespace controls

@@ -1108,9 +1108,12 @@ struct Service : std::enable_shared_from_this<Service> {
                 compositor_compose(device, &f->input, out->texture, cb);
             f->composed = out;
             if (drawable) {
+                // v4.3: the finished frame, where it lands in the drawable, for the controls' glass to bend.
+                controls::Backdrop backdrop;
                 if (out->w == drawable_desc.width && out->h == drawable_desc.height &&
                     out->format == drawable_desc.format) {
                     device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, 0, 0);
+                    backdrop = {out->texture, 0, 0, out->w, out->h};
                 } else if (placed && out->w == rect.w && out->h == rect.h &&
                            rect.x + rect.w <= drawable_desc.width &&
                            rect.y + rect.h <= drawable_desc.height &&
@@ -1130,6 +1133,7 @@ struct Service : std::enable_shared_from_this<Service> {
                     device->end_render_pass(cb);
                     device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, rect.x,
                                  rect.y);
+                    backdrop = {out->texture, rect.x, rect.y, out->w, out->h};
                 } else {
                     CompositorInput in{};
                     in.legacy = true;
@@ -1152,7 +1156,7 @@ struct Service : std::enable_shared_from_this<Service> {
                 const controls::ControlsView controls_view = host_present_controls();
                 if (controls_view.wanted)
                     controls_overlay.draw(device, cb, drawable, drawable_desc.width,
-                                          drawable_desc.height, controls_view);
+                                          drawable_desc.height, controls_view, backdrop);
             }
             host_stats_note_phase(
                 HOST_PHASE_COMPOSITE,

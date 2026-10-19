@@ -17,7 +17,9 @@ namespace controls {
 // are drawn at (x - r.x, y - r.y).
 // Layer `layer` of the view (ControlsView::layers) only: the controls area
 // for layer 0, else that layout group's backdrop and controls.
-void paint_layer(Canvas &c, const ControlsView &view, int layer, const Rect &r);
+// glass (v4.3): only what sits on each control's glass (pad_art.h paint_control_glass), and no group backdrops;
+// Overlay draws the glass itself.
+void paint_layer(Canvas &c, const ControlsView &view, int layer, const Rect &r, bool glass = false);
 
 // Every layer in order, onto one canvas: what the per-layer rasters show
 // when composed (layers never overlap outside portrait's controls area).

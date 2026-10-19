@@ -915,6 +915,14 @@ void apply_focus(bool focused, uint32_t modifier_flags) {
 void post_drawable_size();
 
 TouchMapper g_touch;
+// v4.3: swipes through the game's menus (input_touch.h MenuSwipe). It takes a finger on the game image while
+// menu_swipe_wanted(); a finger it gives back (a tap, or the first of two) goes to g_touch as if it had just landed.
+MenuSwipe g_swipe;
+bool menu_swipe_wanted() {
+    const uint32_t phase = host_d9_game_phase();
+    return (phase == 1 || phase == 3) && mods_controls_value(CONTROLS_MENU_SWIPE_ROW) != 0 &&
+           !mods_controls_editing();
+}
 
 // A touch names a place. The motion event moves the host's idea of the
 // pointer; the PLACE event that follows writes the game's own cursor there
@@ -1010,6 +1018,7 @@ void open_settings_page() {
 void touch_release_all() {
     std::vector<TouchAction> actions;
     g_touch.cancel_all(&actions);
+    g_swipe.cancel_all(&actions);
     push_touch_actions(actions);
     controls::host_release_all();
 }
@@ -1365,6 +1374,10 @@ void handle_event(const SDL_Event &event) {
         if (controls::host_finger_cancel(finger))
             break;
         std::vector<TouchAction> actions;
+        if (g_swipe.owns(finger)) {
+            g_swipe.finger_cancel(finger);
+            break;
+        }
         g_touch.finger_cancel(finger, &actions);
         push_touch_actions(actions);
         break;
@@ -1381,16 +1394,44 @@ void handle_event(const SDL_Event &event) {
         if (event.type == SDL_EVENT_FINGER_DOWN) {
             if (controls::host_finger_down(finger, px, py, now))
                 break;
-            g_touch.finger_down(touch_point(event.tfinger), now, &actions);
+            const TouchPoint tp = touch_point(event.tfinger);
+            if (menu_swipe_wanted()) {
+                g_swipe.set_reverse(mods_controls_value(CONTROLS_SWIPE_REVERSE_ROW) != 0);
+                g_swipe.set_left_edge(game_rect_points().x);
+                if (g_swipe.finger_down(tp, now))
+                    break;
+            }
+            // A second finger: the first one, if it has not swiped, is the gesture mapper's after all.
+            TouchPoint first{};
+            if (g_swipe.take_pending(&first))
+                g_touch.finger_down(first, now, &actions);
+            if (!g_swipe.owns(finger))
+                g_touch.finger_down(tp, now, &actions);
         } else if (event.type == SDL_EVENT_FINGER_UP) {
             if (controls::host_finger_up(finger, now))
                 break;
-            g_touch.finger_up(touch_point(event.tfinger), now, &actions);
+            const TouchPoint tp = touch_point(event.tfinger);
+            if (g_swipe.owns(finger)) {
+                // A finger that never swiped is a tap where it landed: the mapper's click.
+                TouchPoint tap{};
+                if (g_swipe.finger_up(tp, now, &actions, &tap)) {
+                    g_touch.finger_down(tap, now, &actions);
+                    g_touch.finger_up(tap, now, &actions);
+                }
+            } else {
+                g_touch.finger_up(tp, now, &actions);
+            }
         } else {
             if (controls::host_finger_motion(finger, px, py, now))
                 break;
-            g_touch.finger_motion(touch_point(event.tfinger), now, &actions);
+            if (g_swipe.owns(finger))
+                g_swipe.finger_motion(touch_point(event.tfinger), now, &actions);
+            else
+                g_touch.finger_motion(touch_point(event.tfinger), now, &actions);
         }
+        for (int n = g_swipe.take_steps(); n > 0; --n)
+            if (mods_controls_value(CONTROLS_HAPTICS_ROW))
+                platform_ui_haptic_tap();
         push_touch_actions(actions);
         static bool text_input = false;
         if (g_touch.text_input_wanted() != text_input) {
@@ -1545,6 +1586,7 @@ void after_events() {
         std::vector<TouchAction> actions;
         g_touch.frames_presented(host_present_count());
         g_touch.tick(SDL_GetTicksNS(), &actions);
+        g_swipe.tick(SDL_GetTicksNS(), &actions);
         push_touch_actions(actions);
         // The controls follow the hardware keyboard (attached: key layouts
         // hidden), a physical controller (connected: pad layouts hidden and
@@ -2277,7 +2319,8 @@ int main(int argc, char **argv) {
             auto platform = launcher::make_platform(g_window);
             launcher::RunOptions options;
             options.known = game.exe;
-            options.auto_play = !game.exe.empty() && !asked && mobile ? 1.5 : 0;
+            // v4.3 (owner): no auto-start; the launcher waits for Play (it was 1.5 s on a phone or tablet).
+            options.auto_play = 0;
             // A relative dump path is under the app's home (a device's container).
             if (const char *dump = recomp_env("LAUNCHER_DUMP")) {
                 options.dump_path = dump;

@@ -102,6 +102,7 @@ ControlsView make_view(const Layout &l, const Router &r, const Screen &s, double
     ControlsView v;
     v.wanted = true;
     v.dw = s.dw;
+    v.px_per_pt = s.scale > 0 ? s.scale : 1.0;
     v.dh = s.dh;
     v.opacity = opacity;
     const bool toggles_only = r.toggles_only();
@@ -218,6 +219,7 @@ ControlsView make_view(const Editor &e, const Screen &s) {
     v.wanted = true;
     v.editing = true;
     v.dw = s.dw;
+    v.px_per_pt = s.scale > 0 ? s.scale : 1.0;
     v.dh = s.dh;
     v.opacity = 1.0;
     // The dimmer, the grid and the toolbar all reach outside any control, so

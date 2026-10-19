@@ -15,6 +15,9 @@ enum ControlsRow {
     CONTROLS_HAPTICS_ROW,
     CONTROLS_PAD_WITH_CONTROLLER_ROW,
     CONTROLS_SNAP_ROW,
+    CONTROLS_DPAD_ROW,          // v4.3: the pad layouts' D-pad (off: the sticks and swipes cover it)
+    CONTROLS_MENU_SWIPE_ROW,    // v4.3: swipes move through the game's menus (front end and pause)
+    CONTROLS_SWIPE_REVERSE_ROW, // v4.3: swipes move the selection with the finger instead of the content
     CONTROLS_EDIT_ROW,
     CONTROLS_ROW_COUNT
 };
@@ -36,7 +39,7 @@ void mods_controls_reset();
 // True once mods_controls_init has run (and until mods_controls_reset).
 bool mods_controls_initialized();
 // layout: index into the names list (names.size() is Hidden); size 0..2;
-// opacity 20..100 (default 100); haptics/pad_with_controller/snap 0..1; EDIT_ROW: 0.
+// opacity 20..100 (default 100); haptics/pad_with_controller/snap/dpad/menu_swipe/swipe_reverse 0..1; EDIT_ROW: 0.
 int mods_controls_value(ControlsRow row);
 // names[index], or "" when the layout row is on the Hidden choice.
 std::string mods_controls_layout_name();

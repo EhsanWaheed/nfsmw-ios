@@ -98,6 +98,83 @@ fragment float4 hud_f(V v [[stage_in]], texture2d<float> t [[texture(0)]]) {
     constexpr sampler s(filter::linear);
     return t.sample(s, v.uv);
 }
+
+// "glass" (v4.3): one on-screen control as a piece of Liquid Glass over the finished frame (host/controls/overlay.cpp).
+// The frame behind it is bent at the rim (a lens that is thicker at its edge), lightly blurred and lifted, tinted by
+// the control's colour, with a lit rim from the upper left and a soft shadow under it. Premultiplied out.
+struct Glass {
+    float4 rect;  // the shape, drawable pixels: x, y, w, h
+    float4 view;  // drawable w, h; where the backdrop's (0, 0) sits in the drawable: x, y
+    float4 tint;  // rgb, strength
+    float4 p;     // corner radius px, pressed 0..1, alpha, pixels per point
+    float4 bd;    // backdrop w, h, 1 when there is one, shadow margin px
+};
+struct GV { float4 p [[position]]; float2 pos; };
+static float glass_sd(float2 p, float2 b, float r) {
+    const float2 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+vertex GV glass_v(uint i [[vertex_id]], constant Glass& g [[buffer(0)]]) {
+    const float2 q = float2(i & 1, i >> 1);
+    const float m = g.bd.w;
+    const float2 pos = g.rect.xy - m + q * (g.rect.zw + 2.0 * m);
+    GV v;
+    v.p = float4(pos.x / g.view.x * 2.0 - 1.0, 1.0 - pos.y / g.view.y * 2.0, 0, 1);
+    v.pos = pos;
+    return v;
+}
+static float3 glass_tap(texture2d<float> bd, sampler s, float2 uv) {
+    return (any(uv < 0.0) || any(uv > 1.0)) ? float3(0.047, 0.055, 0.07) : bd.sample(s, uv).rgb;
+}
+fragment float4 glass_f(GV v [[stage_in]], constant Glass& g [[buffer(0)]], texture2d<float> bd [[texture(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    const float2 hb = g.rect.zw * 0.5, c = g.rect.xy + hb;
+    const float r = min(g.p.x, min(hb.x, hb.y));
+    const float px = max(g.p.w, 1.0);
+    const float d = glass_sd(v.pos - c, hb, r);
+    if (d > 0.5) {
+        // The shadow: the shape moved down a little, fading out over the margin.
+        const float ds = glass_sd(v.pos - c - float2(0, 2.0 * px), hb, r);
+        const float f = 1.0 - smoothstep(0.0, max(g.bd.w, 1.0), ds);
+        return float4(0, 0, 0, 0.20 * g.p.z * f * f);
+    }
+    const float cover = saturate(0.5 - d);
+    // The rim's outward normal, from the distance field.
+    const float2 n = normalize(float2(glass_sd(v.pos + float2(1, 0) - c, hb, r) - glass_sd(v.pos - float2(1, 0) - c, hb, r),
+                                      glass_sd(v.pos + float2(0, 1) - c, hb, r) - glass_sd(v.pos - float2(0, 1) - c, hb, r)) + 1e-5);
+    const float inner = -d;
+    const float bevel = max(min(min(hb.x, hb.y), 14.0 * px) * 0.9, 1.0);
+    const float t = saturate(1.0 - inner / bevel);   // 1 on the rim, 0 inside the bevel
+    // Lens: the rim pulls the picture from further in, and the whole piece magnifies a touch.
+    const float2 sp = v.pos - n * (t * t * t) * bevel * 0.6 - (v.pos - c) * 0.05;
+    float3 col;
+    if (g.bd.z > 0.5) {
+        const float br = 2.6 * px * (0.6 + 0.4 * t);
+        col = glass_tap(bd, s, (sp - g.view.zw) / g.bd.xy);
+        // Six more taps on a ring (bilinear does the rest); a faint piece (a resting stick's hint) takes one.
+        if (g.p.z >= 0.5) {
+            for (int k = 0; k < 6; ++k) {
+                const float a = float(k) * 1.04719755 + 0.5;
+                col += glass_tap(bd, s, (sp + float2(cos(a), sin(a)) * br - g.view.zw) / g.bd.xy);
+            }
+            col /= 7.0;
+        }
+    } else {
+        col = float3(0.10, 0.11, 0.13);
+    }
+    const float lum = dot(col, float3(0.2126, 0.7152, 0.0722));
+    col = max(mix(float3(lum), col, 1.2), 0.0);   // a little more colour, as glass shows it
+    col = col * 0.80 + 0.09;                       // frosted: lifted, less contrast
+    col = mix(col, g.tint.rgb, g.tint.a);
+    col += g.p.y * (0.10 + g.tint.rgb * 0.22);     // pressed: it lights up
+    const float2 L = normalize(float2(-0.55, -0.85));
+    const float spec = pow(saturate(dot(n, L)), 3.0) * pow(t, 4.0) * 0.55
+                     + pow(saturate(dot(n, -L)), 3.0) * pow(t, 5.0) * 0.18;
+    const float rim = (1.0 - smoothstep(0.0, 1.2 * px, inner)) * 0.20;
+    col += spec + rim;
+    const float a = cover * g.p.z;
+    return float4(saturate(col) * a, a);
+}
 )MSL";
 
 // "d3d", "surface_upload", "guest_readback", "guest_readback_fused", "native_brightness"

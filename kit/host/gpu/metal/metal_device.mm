@@ -138,6 +138,8 @@ const char *vertex_name(const std::string &shader) {
         return "compositor_vertex";
     if (shader == "hud")
         return "hud_v";
+    if (shader == "glass")
+        return "glass_v";
     if (shader == "surface_upload")
         return "surface_upload_vertex";
     return "d3d_vertex";
@@ -149,6 +151,8 @@ const char *fragment_name(const std::string &shader) {
         return "compositor_hdr_fragment"; // Test86
     if (shader == "hud")
         return "hud_f";
+    if (shader == "glass")
+        return "glass_f";
     if (shader == "surface_upload")
         return "surface_upload_fragment";
     return "d3d_fragment";
@@ -190,7 +194,7 @@ MetalDevice::~MetalDevice() {
 id<MTLLibrary> MetalDevice::library_for(const std::string &shader) {
     if (shader == "compositor" || shader == "compositor_hdr")
         return compositor_lib_;
-    if (shader == "hud")
+    if (shader == "hud" || shader == "glass")
         return hud_lib_;
     return d3d_lib_;
 }
