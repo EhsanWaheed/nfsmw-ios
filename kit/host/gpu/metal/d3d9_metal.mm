@@ -1183,9 +1183,19 @@ class Renderer final : public D9Backend {
                 NSString *why = nil;
                 m4_ = [D9M4 contextWithDevice:mtl_ why:&why];
                 const bool fx = m4_ && [MTLFXTemporalScalerDescriptor supportsMetal4FX:mtl_];
-                fprintf(stderr, "[gpu] renderer: Metal 4%s%s%s\n", m4_ ? (fx ? " (MetalFX 4)" : " (no MetalFX 4: native 3D)") : " NOT available: classic Metal (",
-                        m4_ ? "" : why.UTF8String, m4_ ? "" : ")");
-                m4_fx_ = fx;
+                if (m4_ && !fx && !getenv("RECOMP_METAL4_WITHOUT_FX")) {
+                    // v4.4: Metal 4 without MetalFX 4 drew the 3D native (no upscaling at all, a user's M1 iPad);
+                    // classic Metal keeps the classic MetalFX scalers, which every MetalFX device has. The upscale
+                    // is worth far more than the Metal 4 queue. RECOMP_METAL4_WITHOUT_FX=1 keeps Metal 4 (TEST).
+                    m4_ = nil;
+                    fprintf(stderr, "[gpu] renderer: Metal 4 available but MetalFX 4 is not on this device: classic Metal, "
+                                    "so the classic MetalFX upscalers work\n");
+                } else {
+                    fprintf(stderr, "[gpu] renderer: Metal 4%s%s%s\n",
+                            m4_ ? (fx ? " (MetalFX 4)" : " (no MetalFX 4: native 3D)") : " NOT available: classic Metal (",
+                            m4_ ? "" : why.UTF8String, m4_ ? "" : ")");
+                }
+                m4_fx_ = m4_ && fx;
             } else {
                 fprintf(stderr, "[gpu] renderer: Metal 4 NOT available on this OS: classic Metal\n");
             }
