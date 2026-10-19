@@ -1884,6 +1884,10 @@ enum WaitKind : uint8_t { W_NONE, W_OBJECTS, W_CRITSEC };
 
 struct GuestThread {
     size_t index = 0;
+    // v4.3 (heat): what this thread sleeps on in the scheduler, under g_sched_m. A baton handoff wakes only the
+    // thread it hands to (sched_notify_locked); the scheduler-wide wakes still reach every thread
+    // (sched_notify_all_locked). One shared condition woke every parked thread on every handoff, ~90% for nothing.
+    std::condition_variable_any cv;
     uint32_t handle = 0; // 0 for the main thread: it has none
     uint32_t id = 1;     // GetCurrentThreadId
     X86 ctx{};
@@ -1932,6 +1936,34 @@ std::vector<GuestThread *> &threads() {
 std::mutex g_sched_m;
 std::condition_variable_any g_sched_cv;
 size_t g_baton = 0; // index of the thread allowed to run
+// Caller holds g_sched_m. Wakes the one thread `i` (a handoff to it).
+void sched_notify_locked(size_t i) {
+    if (i < threads().size())
+        threads()[i]->cv.notify_all();
+}
+// Caller holds g_sched_m. A guest object changed state (a critical section left, a shim's event set): only the
+// baton holder decides who runs next (a parked thread proceeds only once it is handed the baton), so only it is
+// woken, in case it is parked with nothing runnable. A stranded baton (no holder, or one that has finished) wakes
+// everyone, as before. Measured on the Mac: ~1100 of ~1250 broadcasts a second were these, each waking every thread.
+void sched_notify_all_locked(int src);
+void sched_notify_holder_locked(int src) {
+    if (g_baton < threads().size() && !threads()[g_baton]->finished) {
+        threads()[g_baton]->cv.notify_all();
+        return;
+    }
+    sched_notify_all_locked(src);
+}
+// Caller holds g_sched_m. Wakes every parked thread to re-examine the scheduler's state.
+uint64_t g_stat_wakes = 0, g_stat_wasted = 0, g_stat_handoffs = 0, g_stat_main = 0, g_stat_timeout = 0,
+         g_stat_bcast = 0;
+uint64_t g_stat_bsrc[8] = {};
+void sched_notify_all_locked(int src) {
+    ++g_stat_bcast;
+    ++g_stat_bsrc[src & 7];
+    for (GuestThread *t : threads())
+        t->cv.notify_all();
+    g_sched_cv.notify_all();
+}
 // Read by the host from the very thread that sets it, so a plain bool is the
 // whole of it: no other thread looks.
 bool g_in_idle_slice = false;
@@ -2172,7 +2204,7 @@ bool sched_in_idle_slice() {
 // it so it re-evaluates. Signalling costs nothing when nobody is parked.
 void sched_input_arrived() {
     g_sched_m.lock();
-    g_sched_cv.notify_all();
+    sched_notify_all_locked(1);
     g_sched_m.unlock();
 }
 
@@ -2253,7 +2285,7 @@ void deadline_ticker_main() {
         t.armed_ns = 0;
         l.unlock();
         g_sched_m.lock();
-        g_sched_cv.notify_all();
+        sched_notify_holder_locked(2); // only the baton holder sleeps on a deadline (sched_run_others_locked)
         g_sched_m.unlock();
         if (g_idle_wake && g_in_idle_slice)
             g_idle_wake();
@@ -2282,6 +2314,38 @@ void sched_ticker_arm(double until) {
 // 0 for "no deadline, wake when something changes"). The lock is released
 // across a host slice, so the host may call back into the runtime - signalling
 // a guest event, most obviously - without deadlocking against the scheduler.
+// TEST (RECOMP_SCHED_STATS=1): scheduler wakeups against baton handoffs, every 5 s. Caller holds g_sched_m.
+bool thread_runnable(const GuestThread *t);
+double g_stat_t0 = 0;
+void sched_stat_wake(size_t me, bool timed_out) {
+    static const bool on = recomp_env("SCHED_STATS") != nullptr;
+    if (!on)
+        return;
+    ++g_stat_wakes;
+    if (g_baton != me && !thread_runnable(threads()[me])) {
+        ++g_stat_wasted;
+        if (threads()[me]->is_main)
+            ++g_stat_main;
+        if (timed_out)
+            ++g_stat_timeout;
+    }
+    const double now = sched_now();
+    if (!g_stat_t0)
+        g_stat_t0 = now;
+    if (now - g_stat_t0 >= 5.0) {
+        const double dt = now - g_stat_t0;
+        fprintf(stderr, "[sched] per second: %.0f wakeups (%.0f with nothing to do: main %.0f, timeouts %.0f), %.0f handoffs, "
+                "%.0f broadcasts (input %.0f ticker %.0f host-signal %.0f shim %.0f critsec %.0f resume %.0f other %.0f), %zu threads\n",
+                g_stat_wakes / dt, g_stat_wasted / dt, g_stat_main / dt, g_stat_timeout / dt, g_stat_handoffs / dt,
+                g_stat_bcast / dt, g_stat_bsrc[1] / dt, g_stat_bsrc[2] / dt, g_stat_bsrc[3] / dt, g_stat_bsrc[4] / dt,
+                g_stat_bsrc[5] / dt, g_stat_bsrc[6] / dt, g_stat_bsrc[0] / dt, threads().size());
+        g_stat_wakes = g_stat_wasted = g_stat_handoffs = g_stat_main = g_stat_timeout = g_stat_bcast = 0;
+        for (uint64_t &b : g_stat_bsrc)
+            b = 0;
+        g_stat_t0 = now;
+    }
+}
+
 void sched_wait_locked(size_t me, double until, double max_slice) {
     double now = sched_now();
     if (until && until <= now)
@@ -2321,7 +2385,8 @@ void sched_wait_locked(size_t me, double until, double max_slice) {
         return;
     if (wait > 1.0)
         wait = 1.0;
-    g_sched_cv.wait_for(g_sched_m, std::chrono::duration<double>(wait));
+    const bool timed_out = threads()[me]->cv.wait_for(g_sched_m, std::chrono::duration<double>(wait)) == std::cv_status::timeout;
+    sched_stat_wake(me, timed_out);
 }
 
 // ---------------------------------------------------------------------------
@@ -2695,7 +2760,8 @@ void sched_run_others_locked(size_t me, const char *why) {
         if (next != NO_THREAD) {
             g_baton = next;
             record_handoff_locked(me, next, why);
-            g_sched_cv.notify_all();
+            ++g_stat_handoffs;
+            sched_notify_locked(next);
             // Wait for the baton, then loop: holding it is not the same as
             // being runnable, and a thread that ends hands the baton on
             // without knowing who is eligible. The run thread services the
@@ -2783,7 +2849,7 @@ void sched_handoff_on_exit_locked(size_t me, const char *why) {
         next = 0;
     g_baton = next;
     record_handoff_locked(me, next, why);
-    g_sched_cv.notify_all();
+    sched_notify_locked(next);
 }
 
 // Blocks the calling thread until its wait completes or its deadline passes.
@@ -2905,7 +2971,8 @@ bool guest_yield() {
         const double away = me->last_yield;
         g_baton = next;
         record_handoff_locked(me->index, next, "yield");
-        g_sched_cv.notify_all();
+        ++g_stat_handoffs;
+        sched_notify_locked(next);
         while (g_baton != me->index)
             sched_wait_locked(me->index, 0.0, HOST_IDLE_BATON_SLICE);
         if (me->is_main) {
@@ -2984,7 +3051,7 @@ void guest_event_signal_from_host(uint32_t handle) {
         return;
     g_sched_m.lock();
     g_host_signals.push_back(handle);
-    g_sched_cv.notify_all();
+    sched_notify_all_locked(3);
     g_sched_m.unlock();
 }
 
@@ -3068,7 +3135,7 @@ namespace {
 // whole timeout.
 void sched_wake_all() {
     g_sched_m.lock();
-    g_sched_cv.notify_all();
+    sched_notify_holder_locked(4);
     g_sched_m.unlock();
 }
 
@@ -3254,7 +3321,7 @@ void sched_leave_critsec(uint32_t cs) {
     wr32(cs + CS_OFF_LOCK_COUNT, rec ? rec - 1 : 0xffffffffu);
     if (!rec) {
         wr32(cs + CS_OFF_OWNER, 0);
-        g_sched_cv.notify_all();
+        sched_notify_holder_locked(5);
     }
     g_sched_m.unlock();
 }
@@ -3305,7 +3372,7 @@ void *thread_host_main(void *arg) {
 
     g_sched_m.lock();
     while (g_baton != t->index && !g_exit_requested)
-        g_sched_cv.wait(g_sched_m);
+        t->cv.wait(g_sched_m);
     bool exiting = g_exit_requested;
     g_sched_m.unlock();
     // Created before the exit, first scheduled after it: Windows would never
@@ -3401,7 +3468,7 @@ void publish_process_exit(uint32_t code) {
     g_sched_m.lock();
     g_exit_requested = true;
     g_exit_requested_code = code;
-    g_sched_cv.notify_all();
+    sched_notify_all_locked(0);
     g_sched_m.unlock();
 }
 
@@ -3413,7 +3480,7 @@ bool request_process_exit(uint32_t code) {
     g_exit_requested_code = code;
     // Wake anything parked: the main thread may be inside an indefinite wait,
     // and it is the only thread that can perform the exit.
-    g_sched_cv.notify_all();
+    sched_notify_all_locked(0);
     g_sched_m.unlock();
     thread_finish_exit_process();
     return true;
@@ -3647,7 +3714,7 @@ void k_ResumeThread(X86 *c) {
             --t->suspend_count;
         o->thread_suspended = t->suspend_count > 0;
         if (!t->suspend_count)
-            g_sched_cv.notify_all();
+            sched_notify_all_locked(6);
         g_sched_m.unlock();
         set_eax(c, (uint32_t)was);
         return;
@@ -4488,7 +4555,7 @@ void sched_drive_release(void) {
             } else {
                 g_baton = NO_THREAD;
             }
-            g_sched_cv.notify_all();
+            sched_notify_all_locked(0);
         }
     }
     g_sched_m.unlock();
