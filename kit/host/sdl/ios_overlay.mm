@@ -774,6 +774,10 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                     @"(compatibility) sharpens each frame on its own. Restart the game to switch."
               style:UIFontTextStyleSubheadline],
         self.upscaler,
+        // v4.4 (owner): say plainly where MetalFX does not run (mods/core/nfsmw upscale.h stands aside there)
+        [self note:@"Not supported with the PC look, or with the game's own Visual Treatment or OverBright options "
+                   @"(in the game's Options): the 3D scene then stays at the output resolution, without MetalFX or the "
+                   @"Thermal controller. Use Definitive or Xbox 360 with Visual Treatment off to upscale."],
         [self row:@"Frame cap (fps)" control:self.frameCap],
         [self rowWithTitle:[self label:@"Thermal controller" style:UIFontTextStyleBody]
                     detail:[self note:@"Steps the 3D scene down as the device heats up (fair: one step, serious: "
@@ -837,7 +841,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     int64_t look = 0;
     mod_setting("look", nullptr, &look);
     NSString *scene = iw ? [NSString stringWithFormat:@"3D scene %d×%d → %d×%d (%@)", iw, ih, ow, oh, kind]
-                         : look == 2 ? @"3D scene at native resolution: the PC look does not use MetalFX (Definitive or Xbox 360 do)"
+                         : look == 2 ? @"3D scene at native resolution: MetalFX is not supported with the PC look"
                          : _appliedRows == 0 ? @"3D scene at native resolution (MetalFX off)"
                                              : @"3D scene: not upscaled yet (starts with the next 3D frame)";
     NSString *stepped = _appliedRows != [self userRows]
