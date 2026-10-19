@@ -153,6 +153,7 @@ const ButtonRow *button_row(const std::string &label) {
 struct PerfSwitch {
     const char *key, *title;
     bool restart;
+    bool sound = false; // v4.5: shown under Home's Sound section instead of Performance
 };
 const PerfSwitch kPerfSwitches[] = {
     {"ssao", "Ambient occlusion (contact shadows)", false},
@@ -162,6 +163,7 @@ const PerfSwitch kPerfSwitches[] = {
     {"soft_shadows", "Softer shadows", true},
     {"mirror_hd", "Mirror: sharp HD picture", true},
     {"always_rain", "Always rain", true},
+    {"x360_engine_sounds", "Xbox 360 engine sounds", true, true},
 };
 
 // A DualSense, drawn (UIKit has no picture of one): white body and grips, black centre, the touchpad with its blue
@@ -706,7 +708,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
     self.outputNote = [self note:@""];
     [self updateOutputNote];
 
-    NSMutableArray *perf = [NSMutableArray array], *perfRows = [NSMutableArray array];
+    NSMutableArray *perf = [NSMutableArray array], *perfRows = [NSMutableArray array], *soundRows = [NSMutableArray array];
     for (size_t i = 0; i < sizeof kPerfSwitches / sizeof kPerfSwitches[0]; ++i) {
         UISwitch *sw = [UISwitch new];
         sw.tag = (NSInteger)i;
@@ -715,7 +717,7 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         NSString *title = [NSString stringWithUTF8String:kPerfSwitches[i].title];
         if (kPerfSwitches[i].restart)
             title = [title stringByAppendingString:@" (next launch)"];
-        [perfRows addObject:[self row:title control:sw]];
+        [(kPerfSwitches[i].sound ? soundRows : perfRows) addObject:[self row:title control:sw]];
     }
     self.perf = perf;
     self.maxPerf = [self switchFor:kMaxPerf action:@selector(maxPerfChanged:)];
@@ -732,6 +734,9 @@ UIVisualEffect *glass_effect(BOOL interactive) {
                                       control:self.maxPerf]
                    atIndex:0];
     UIStackView *perfStack = [[UIStackView alloc] initWithArrangedSubviews:perfRows];
+    UIStackView *soundStack = [[UIStackView alloc] initWithArrangedSubviews:soundRows];
+    soundStack.axis = UILayoutConstraintAxisVertical;
+    soundStack.spacing = 8;
     perfStack.axis = UILayoutConstraintAxisVertical;
     perfStack.spacing = 12;
 
@@ -791,6 +796,11 @@ UIVisualEffect *glass_effect(BOOL interactive) {
         [self note:@"The Definitive look's heaviest extras; the Detail level leaves these on. Turning them off keeps "
                    @"the phone cooler. The PC look has none of them."],
         perfStack,
+        [self section:@"Sound"],
+        [self note:@"The Xbox 360 version's engine sounds, from your own copy of the Xbox 360 Stuff Pack (its "
+                   @"SOUND/ENGINE folder in your game folder as X360Sound/SOUND/ENGINE). Off: the PC engines. The PC "
+                   @"look always uses the PC engines."],
+        soundStack,
         [self section:@"Experimental (next launch)"],
         [self row:@"Effects (glow, depth of field, motion blur) at the 3D resolution" control:self.effects],
         hint,
