@@ -189,6 +189,22 @@ vertex layout's contents). The efficiency work that came with it, for both rende
   still over the game.
 - Version from `RECOMP_APP_VERSION` (4.2), build number = commit count at configure time.
 
+### Game code PGO (v4.5)
+
+The translated game code (`recomp_gen`) can be built with profile-guided optimisation (`kit/cmake/Translate.cmake`
+RECOMP_PGO). The profile is `build/pgo/nfsmw.profdata` (kept out of git, like every build output):
+
+1. `cmake build/cmake/macos -DRECOMP_PGO=generate`, build, run with
+   `LLVM_PROFILE_FILE="/tmp/pgo/nfsmw-%p%c.profraw"` (`%c`: continuous, so a crash or kill still keeps it) and drive a
+   few minutes of races (a CPU sampler freezes the instrumented build: do not `sample` it).
+2. `xcrun llvm-profdata merge -o build/pgo/nfsmw.profdata /tmp/pgo/*.profraw`
+3. Configure both build dirs with `-DRECOMP_PGO=$PWD/build/pgo/nfsmw.profdata` (cached) and rebuild.
+
+Measured (20 Oct): the game thread's CPU in a race on the iPhone 17 Pro Max 12.45 s -> 10.05 s per 30 s (-19%), the
+Mac main menu -1.5%. `-O3` and `-mcpu=apple-m1` gained nothing (RECOMP_GEN_OPT / RECOMP_GEN_CPU stay at 2 / empty).
+Redo the profile when the translation is regenerated (stale functions just lose their profile; the build warns
+nothing).
+
 ### v4.4 (heat)
 
 - **Scheduler** (`kit/runtime/kernel32.cpp`): each guest thread sleeps on its own condition variable; a baton
