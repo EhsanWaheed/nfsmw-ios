@@ -97,6 +97,12 @@ the screen to hide the touch controls, and again to bring them back. With the **
 settings are greyed out with a note (it never upscales; nor do the game's own Visual Treatment / OverBright
 options); a device with Metal 4 but no MetalFX 4 falls back to classic Metal so it still upscales.
 
+**v4.5:** the game's own code is now built with **profile-guided optimisation**: the compiler learned from a real
+race which paths are hot, and the game thread does about **19% less CPU work** in a race on an iPhone 17 Pro Max
+(cooler for longer). **Xbox 360 engine sounds** (Home → Sound): if you have your own copy of the community Xbox 360
+Stuff Pack, put its `SOUND/ENGINE` folder in your game folder as `X360Sound/SOUND/ENGINE` and the 360 engine sounds
+replace the PC ones (87 engines). They are not included with the app.
+
 ## Play it on your Mac
 
 1. Have your own installed copy of the PC game (Black Edition, version 1.3) on your Mac.
