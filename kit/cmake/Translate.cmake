@@ -30,6 +30,33 @@ else()
   message(STATUS "No translation found: hosts and game-backed tests are not defined")
 endif()
 
+# v4.5 (heat): how the translated game code is compiled. RECOMP_GEN_OPT is the -O level (2 as before),
+# RECOMP_GEN_CPU an -mcpu (e.g. apple-m1: every Metal 4 device is A14/M1 or newer), and RECOMP_PGO profile-guided
+# optimisation: "generate" builds an instrumented game (run it, then merge the .profraw with llvm-profdata) and
+# any other value is the merged .profdata to optimise with.
+set(RECOMP_GEN_OPT "2" CACHE STRING "Optimisation level for the translated game code")
+set(RECOMP_GEN_CPU "" CACHE STRING "-mcpu for the translated game code (empty: the toolchain's default)")
+set(RECOMP_PGO "" CACHE STRING "Profile-guided optimisation of the translated game code: generate, or a .profdata")
+function(pop_gen_tune target)
+  pop_optimize(${target} ${RECOMP_GEN_OPT})
+  if(RECOMP_GEN_CPU)
+    target_compile_options(${target} PRIVATE -mcpu=${RECOMP_GEN_CPU})
+  endif()
+  if(RECOMP_PGO STREQUAL "generate")
+    target_compile_options(${target} PRIVATE -fprofile-instr-generate)
+  elseif(RECOMP_PGO)
+    if(NOT EXISTS ${RECOMP_PGO})
+      message(FATAL_ERROR "RECOMP_PGO profile not found: ${RECOMP_PGO}")
+    endif()
+    target_compile_options(${target} PRIVATE -fprofile-instr-use=${RECOMP_PGO}
+                           -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+  endif()
+endfunction()
+if(RECOMP_PGO STREQUAL "generate")
+  # The profile runtime comes with the link of anything that holds instrumented code.
+  add_link_options(-fprofile-instr-generate)
+endif()
+
 if(POP_HAVE_GEN)
   file(GLOB POP_GEN_SOURCES CONFIGURE_DEPENDS ${POP_GEN_DIR}/chunk_*.c ${POP_GEN_DIR}/table.c)
   add_library(recomp_gen STATIC ${POP_GEN_SOURCES})
@@ -53,7 +80,7 @@ if(POP_HAVE_GEN)
     target_include_directories(recomp_gen PRIVATE ${_override_dir})
     message(STATUS "Native overrides: ${RECOMP_OVERRIDE_HEADER}")
   endif()
-  pop_optimize(recomp_gen 2)
+  pop_gen_tune(recomp_gen)
   # Auxiliary modules (game.toml [modules.aux.<key>]) are translated into
   # gen/aux-<key>/ with their own funcs.h and prefixed tables, so each is its
   # own library; their table.c registers with the runtime's module registry.
@@ -78,7 +105,7 @@ if(POP_HAVE_GEN)
       target_include_directories(${aux_target} PRIVATE ${_override_dir})
     endif()
     target_compile_options(${aux_target} PRIVATE ${POP_WARN_GEN})
-    pop_optimize(${aux_target} 2)
+    pop_gen_tune(${aux_target})
     list(APPEND POP_GEN_AUX_TARGETS ${aux_target})
     message(STATUS "Auxiliary module translation: ${dir}")
   endforeach()
